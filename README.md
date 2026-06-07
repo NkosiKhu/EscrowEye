@@ -1,23 +1,23 @@
 # EscrowEye
 
-Two-party property inspection escrow on **Hedera**.
+Two-party property cleaning escrow on **Hedera**.
 
-A requester deposits HBAR into escrow and opens an inspection job. An inspector submits photos. They go back and forth (more photos, clarifications) until both are satisfied. When both parties confirm via their agents, escrow releases to the inspector.
+An owner pays an x402 job-submission fee, creates a cleaning job, accepts a supplier bid, and funds HBAR escrow. The supplier submits encrypted IPFS photos, the EscrowEye agent reviews them in the job chat, and escrow releases to the supplier after confirmation.
 
 ---
 
 ## Stack
 
-| Layer       | Technology                                   |
-| ----------- | -------------------------------------------- |
-| Backend     | FastAPI + Uvicorn (Python 3.12)              |
-| Frontend    | React + TypeScript + Vite                    |
-| Ledger      | Hedera (HCS for logging, HBAR for escrow)    |
-| Photos      | IPFS via Pinata (CIDs logged to HCS)         |
-| Wallet      | HashPack                                     |
-| Gate        | x402 (blocky402.com) on job creation         |
-| Testing     | Playwright                                   |
-| Docs        | Context7                                     |
+| Layer       | Technology                                      |
+| ----------- | ----------------------------------------------- |
+| Backend     | FastAPI + Uvicorn (Python 3.12)                 |
+| Frontend    | React + TypeScript + Vite + shadcn-style UI     |
+| Agent       | Hedera Agent Kit + LangGraph + OpenRouter GPT-4o |
+| Ledger      | Hedera HCS audit events + HBAR escrow           |
+| Photos      | IPFS via Pinata, CIDs stored in SQLite          |
+| Wallet      | HashPack via WalletConnect                      |
+| Gate        | x402 with Blocky402 on `POST /api/jobs`         |
+| Testing     | Playwright                                      |
 
 ---
 
@@ -25,7 +25,7 @@ A requester deposits HBAR into escrow and opens an inspection job. An inspector 
 
 ```
 ┌────────────┐     ┌──────────────┐     ┌────────────┐
-│  Requester │◄───►│  EscrowEye   │◄───►│  Inspector │
+│   Owner    │◄───►│  EscrowEye   │◄───►│  Supplier  │
 │  (HashPack)│     │   (API + UI) │     │  (HashPack)│
 └─────┬──────┘     └──────┬───────┘     └─────┬──────┘
       │                   │                    │
@@ -47,12 +47,25 @@ A requester deposits HBAR into escrow and opens an inspection job. An inspector 
 
 ### Job Flow
 
-1. **Creation** — Requester pays x402 fee → job created on-chain via HCS message
-2. **Deposit** — Requester deposits HBAR into escrow
-3. **Inspection** — Inspector submits photos (IPFS) → logged to HCS
-4. **Exchange** — Back-and-forth photo requests, clarifications via HCS
-5. **Confirmation** — Both parties (via agents) sign off
-6. **Release** — Escrow releases HBAR to inspector
+1. **Creation** — Owner posts a job through `POST /api/jobs`; unpaid requests return x402 `402 Payment Required`, then the paid replay creates the job and writes `job_created` to HCS.
+2. **Bidding** — Suppliers browse open jobs and place bids with `amount_tinybar`.
+3. **Deposit** — Owner accepts a bid and funds a Hedera escrow account.
+4. **Inspection** — Supplier submits encrypted photos to IPFS; photo CIDs and encrypted key metadata stay in SQLite.
+5. **Agent Review** — The chat-panel agent reviews photos, assigns rooms, and requests retakes or posts an all-clear message.
+6. **Confirmation** — Supplier marks ready, owner confirms with HashPack, and escrow releases HBAR to the supplier.
+7. **Audit** — HCS records exactly three event types in the MVP: `job_created`, `job_completed`, and `job_disputed`.
+
+### Demo Shape
+
+The public demo is a hosted web app, not a standalone chatbot. The primary screen is a normal shadcn-style job workspace with an optional full-height/full-screen agent chat panel that can create/setup jobs instead of using the manual forms.
+
+For Week 3 submission, the video should show:
+
+1. Owner connects HashPack.
+2. Owner asks the chat-panel agent to create a job or uses the regular form.
+3. `POST /api/jobs` triggers the x402/Blocky402 payment flow.
+4. Paid replay creates the job and the app shows the agent confirmation.
+5. Supplier photo upload triggers agent review in the same conversation.
 
 ---
 
@@ -110,13 +123,15 @@ EscrowEye/
 
 ---
 
-## Open Questions
+## Decisions
 
 | Question                | Status |
 | ----------------------- | ------ |
-| Escrow mechanism        | TBD — multisig account vs smart contract |
-| Auth strategy           | TBD — HashPack signatures, JWTs, or other |
-| Deployment target       | TBD — VPS, K8s, Railway, etc. |
+| Escrow mechanism        | Hedera native 2-of-3 threshold account |
+| Auth strategy           | JWT session plus HashPack wallet signatures |
+| x402 gate               | Native `402 Payment Required` on `POST /api/jobs` |
+| HCS scope               | `job_created`, `job_completed`, `job_disputed` only |
+| Deployment target       | Publicly hosted app, video acceptable for submission |
 
 ---
 

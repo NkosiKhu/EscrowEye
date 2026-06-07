@@ -21,7 +21,8 @@
 
 - **One agent** — not a fleet of specialized sub-agents. The same agent handles form-filling, bidding, chatting, and photo review.
 - **Same API** — every tool the agent calls maps to a REST endpoint the frontend also uses. There is no separate "agent API."
-- **Human-in-the-loop by default** — the agent proposes actions. The user confirms through the UI or chat. The only autonomous path is photo review (and even that just posts messages — it doesn't release funds).
+- **Agent recommends, owner decides** — the agent never changes job status. It posts review results as messages; the owner confirms via the UI.
+- **Three message types** — `human` (normal user), `agent` (bot responses in chat), `system` (status banners). All three render in the same conversation.
 - **Conversation as the interface** — the agent lives in the same chat as human messages. No separate agent dashboard.
 
 ---
@@ -32,16 +33,16 @@
 ┌───────────────────────────────────────────────────────────────┐
 │                      FastAPI Backend                           │
 │                                                                │
-│  POST /api/jobs/:id/messages                                   │
+│  POST /api/jobs/{job_id}/messages                              │
 │       │                                                        │
 │       ▼                                                        │
 │  ┌─────────────────────────────────┐                           │
 │  │  Message Handler                │                           │
-│  │  └─ has photo_ids? ──→ trigger  │                           │
-│  │       no              LangGraph │                           │
-│  │       │              Reviewer   │                           │
-│  │       ▼                        │                           │
-│  │  Normal chat flow              │                           │
+│  │  └─ Always stores human msg     │                           │
+│  │       │                         │                           │
+│  │       ├─ has photo_ids? ──────→ LangGraph Reviewer          │
+│  │       ├─ agent mode? ─────────→ Assistant Agent             │
+│  │       └─ otherwise ───────────→ Normal chat only            │
 │  └─────────────────────────────────┘                           │
 │                                                                │
 │  The agent itself runs as a background process:                │
@@ -49,7 +50,7 @@
 │  │  EscrowEye Agent (LangGraph)                   │            │
 │  │                                                │            │
 │  │  Runtime: Python, asyncio, LangGraph           │            │
-│  │  LLM: gpt-4o-mini (via LangChain ChatOpenAI)   │            │
+│  │  LLM: openai/gpt-4o via ChatOpenRouter         │            │
 │  │  Tools: all call FastAPI internally (httpx)    │            │
 │  │  State: per-job, persisted to SQLite           │            │
 │  └────────────────────────────────────────────────┘            │
@@ -69,19 +70,20 @@ For the hackathon this is fine. If it becomes a bottleneck, spin it into a separ
 
 ### Trigger
 
-User sends a message in the conversational UI that doesn't have `photo_ids`. The backend routes it to the agent instead of storing it directly.
+User sends a message from the app's chat panel with agent mode enabled and no `photo_ids`. The backend stores the human message first, then invokes the assistant agent.
 
 ### What happens
 
 ```
 User: "Bid 45 HBAR on job 3"
 
-1. Agent receives: { job_id: 3, body: "Bid 45 HBAR on job 3", sender_id: current_user }
-2. Agent interprets intent via LLM
-3. Agent calls tool: place_bid(job_id=3, amount=45000000)
-4. API returns: { bid_id: 5, status: "pending" }
-5. Agent stores response as a system message in the conversation
-6. Frontend refreshes: user sees "Bid of 45 HBAR placed on job 3 (bid #5)"
+1. Backend stores the human message.
+2. Agent receives: { job_id: 3, body: "Bid 45 HBAR on job 3", sender_user_id: current_user }
+3. Agent interprets intent via LLM
+4. Agent calls tool: place_bid(job_id=3, amount_tinybar=4500000000)
+5. API returns: { id: 5, amount_tinybar: 4500000000, status: "pending" }
+6. Agent stores its response as an `agent` message in the conversation
+7. Frontend refreshes: user sees "Bid of 45 HBAR placed on job 3 (bid #5)"
 ```
 
 ### What the user sees
@@ -109,8 +111,13 @@ User: "Bid 45 HBAR on job 3"
 | Fund escrow | `fund_escrow` | "Pay the escrow for job 3" |
 | Send message | `send_message` | "Tell the supplier the kitchen looks great" |
 | View photos | `get_photos` | "Show me the photos for job 3" |
+| Mark ready | `mark_ready` | "Mark job 3 ready for review" |
 | Confirm job | `confirm_job` | "Confirm job 3 is complete" |
 | Dispute job | `dispute_job` | "Dispute job 3, the bathroom wasn't cleaned" |
+
+### Paid job creation path
+
+When the user asks the chat-panel agent to create a job, the agent gathers the missing job fields and calls `create_job`. If the API returns `402 Payment Required`, the frontend opens the x402/Blocky402 payment flow. After the user approves payment with HashPack, the frontend replays the same `POST /api/jobs` request. The agent then posts a normal `agent` message confirming the job was created and linking to the new job workspace.
 
 ---
 
@@ -118,7 +125,7 @@ User: "Bid 45 HBAR on job 3"
 
 ### Trigger
 
-`POST /api/jobs/:id/messages` with `photo_ids` non-empty. The handler stores the message, then fires the review agent in the background.
+`POST /api/jobs/{job_id}/messages` with `photo_ids` non-empty. The handler stores the human message, then fires the review agent in the background.
 
 ### Flow
 
@@ -130,16 +137,16 @@ User: "Bid 45 HBAR on job 3"
    asyncio.create_task(review_agent.run(job_id=3))
    
 3. Review agent:
-   a. Loads job details (instructions, rooms)
+   a. Loads job details (room names, access_notes)
    b. Loads photo metadata (CIDs, sequence numbers)
    c. Decrypts each photo using the EscrowEye server key
-   d. Sends to LLM with a structured prompt
-   e. Decides: pass or retry per room
+   d. **Stage 1 — per-photo analysis**: resizes each image with Pillow, base64-encodes it, and sends it to `openai/gpt-4o` through `ChatOpenRouter` for room identification + cleanliness rating
+   e. **Stage 2 — summary decision**: feeds all per-photo results into the LLM for a final pass/fail per room
 
 4a. ALL PASS:
-    → Agent calls associate_photo for each room assignment
-    → Agent posts message: "✅ All rooms look clean. Job approved."
-    → Job status → awaiting_confirmation (owner can now confirm)
+    → Agent calls associate_photo for each room assignment/review result
+    → Agent posts message: "✅ All rooms look clean. Ready for your review!"
+    → Owner sees the "all clear" in chat and decides whether to confirm via the UI
 
 4b. FAILURES:
     → Agent posts message: "❌ Kitchen needs more work. The counters are still dirty."
@@ -148,25 +155,60 @@ User: "Bid 45 HBAR on job 3"
     → Agent re-runs on next photo upload
 ```
 
-### Review prompt (abridged)
+### Review prompts
+
+#### Stage 1 — per-photo (multimodal, image + text)
 
 ```
-You are reviewing photos for a cleaning job.
+You are evaluating a cleaning photo for job #{job_id}.
 
-Job instructions: {instructions}
-Rooms to clean: {room_names}
+Rooms to clean: {rooms_with_ids}
 
-Photo {sequence}: appears to show {room_guess}. 
-Does this room pass the cleaning check? 
-Be specific about what's wrong if it fails.
+Photo data: {base64_image}
 
-Respond in JSON:
+Respond in JSON only:
 {
-  "room_assignments": [{ "photo_id": 1, "room": "Kitchen" }],
-  "results": [
-    { "photo_id": 1, "room": "Kitchen", "pass": true },
-    { "photo_id": 2, "room": "Bathroom", "pass": false, "reason": "Sink is visibly dirty" }
-  ]
+  "room_id": 1,
+  "room_name": "Kitchen",
+  "confidence": 0.95,
+  "cleanliness_score": 3,
+  "pass": false,
+  "issues": ["Counters have visible crumbs", "Floor needs mopping"]
+}
+
+- room_id: the matching room id from the provided room list
+- room_name: the matching room name
+- confidence: 0-1 how sure you are about the room
+- cleanliness_score: 1-5 (5 = spotless)
+- pass: true if score >= 4
+- issues: list of specific problems if score < 4
+```
+
+#### Stage 2 — summary (text only)
+
+```
+You are summarizing the photo review for cleaning job #{job_id}.
+
+Rooms to clean: {rooms_with_ids}
+
+Per-photo results:
+{stage_1_results}
+
+Decide:
+- Which photos pass/fail overall
+- Associate each photo to a room
+- Overall verdict: all clean or specific retakes needed
+
+Respond in JSON only:
+{
+  "room_assignments": [
+    { "photo_id": 1, "room_id": 1, "review_status": "failed" }
+  ],
+  "overall_pass": false,
+  "retake_needed": [
+    { "room_id": 1, "room_name": "Kitchen", "reason": "Counters still dirty" }
+  ],
+  "summary": "Kitchen needs a retake. Bathroom and living room look good."
 }
 ```
 
@@ -183,7 +225,7 @@ The agent is the only component that associates photos with rooms. The `photos.r
 ```python
 class ReviewState(TypedDict):
     job_id: int
-    status: Literal["pending", "reviewing", "waiting_for_retry", "approved"]
+    status: Literal["pending", "reviewing", "waiting_for_retry", "all_clear"]
     attempt_count: int
     max_attempts: int  # default 3
     messages: list[dict]  # conversation so far
@@ -216,9 +258,9 @@ class ReviewState(TypedDict):
                  │             │
                  ▼             ▼
         ┌────────────────┐  ┌─────────────────────┐
-        │  approve_job   │  │  request_retry       │
-        │  (set awaiting │  │  (post system msg)    │
-        │   confirmation)│  └──────────┬────────────┘
+        │  notify_owner   │  │  request_retry       │
+        │  (post all-clear│  │  (post system msg)    │
+        │   message)      │  └──────────┬────────────┘
         └───────┬────────┘             │
                 │                      ▼
                 │              ┌──────────────┐
@@ -262,43 +304,47 @@ def fetch_context(state: ReviewState) -> ReviewState:
 
 
 def review_photos(state: ReviewState) -> ReviewState:
-    prompt = build_review_prompt(state["job"], state["rooms"], state["photos"])
-    result = llm.invoke(prompt)
+    per_photo_results = analyze_photos_multimodal(state["job"], state["rooms"], state["photos"])
+    summary = summarize_results(per_photo_results)
 
-    # Parse JSON result
-    for r in result["room_assignments"]:
-        associate_photo(r["photo_id"], r["room"])
+    for r in summary["room_assignments"]:
+        associate_photo(
+            job_id=state["job_id"],
+            photo_id=r["photo_id"],
+            room_id=r["room_id"],
+            review_status=r["review_status"],
+        )
 
-    failures = [r for r in result["results"] if not r["pass"]]
-    if not failures:
-        return {**state, "status": "approved"}
+    if summary["overall_pass"]:
+        return {**state, "status": "all_clear", "summary": summary}
     else:
         return {**state, "status": "waiting_for_retry",
-                "failures": failures, "attempt_count": state["attempt_count"] + 1}
+                "failures": summary["retake_needed"],
+                "attempt_count": state["attempt_count"] + 1}
 
 
-def approve_job(state: ReviewState) -> ReviewState:
-    send_message(state["job_id"], "✅ All rooms look clean. Job is ready for your confirmation.", sender="system")
-    update_job_status(state["job_id"], "awaiting_confirmation")
+def notify_owner(state: ReviewState) -> ReviewState:
+    send_message(state["job_id"], "✅ All rooms look clean. Ready for your review!", sender_type="agent")
+    # Agent does NOT change job status — owner confirms via UI
     return state
 
 
 def request_retry(state: ReviewState) -> ReviewState:
     for f in state["failures"]:
-        send_message(state["job_id"], f"❌ {f['room']}: {f['reason']}. Please retake.", sender="system")
+        send_message(state["job_id"], f"❌ {f['room_name']}: {f['reason']}. Please retake.", sender_type="agent")
     return state
 
 
 def wait_for_new_photo(state: ReviewState) -> ReviewState:
     if state["attempt_count"] >= state["max_attempts"]:
-        send_message(state["job_id"], "⚠️ Max retries reached. Manual review needed.", sender="system")
+        send_message(state["job_id"], "⚠️ Max retries reached. Manual review needed.", sender_type="system")
         return {**state, "end": True}  # escape to END
     # Agent sleeps — next photo upload will trigger a new review cycle
     return state
 
 
-def route_after_review(state: ReviewState) -> Literal["approve_job", "request_retry"]:
-    return "approve_job" if state["status"] == "approved" else "request_retry"
+def route_after_review(state: ReviewState) -> Literal["notify_owner", "request_retry"]:
+    return "notify_owner" if state["status"] == "all_clear" else "request_retry"
 ```
 
 ### Graph builder
@@ -310,14 +356,14 @@ builder = StateGraph(ReviewState)
 
 builder.add_node("fetch_context", fetch_context)
 builder.add_node("review_photos", review_photos)
-builder.add_node("approve_job", approve_job)
+builder.add_node("notify_owner", notify_owner)
 builder.add_node("request_retry", request_retry)
 builder.add_node("wait_for_new_photo", wait_for_new_photo)
 
 builder.add_edge(START, "fetch_context")
 builder.add_edge("fetch_context", "review_photos")
 builder.add_conditional_edges("review_photos", route_after_review)
-builder.add_edge("approve_job", END)
+builder.add_edge("notify_owner", END)
 builder.add_edge("request_retry", "wait_for_new_photo")
 ```
 
@@ -345,20 +391,21 @@ Every tool wraps a FastAPI endpoint call via `httpx.AsyncClient`. The agent runs
 | Tool | Input | Output | Calls |
 |---|---|---|---|
 | `get_jobs(status=None)` | filter string | JSON job list | `GET /api/jobs` |
-| `get_job(job_id)` | int | JSON job object | `GET /api/jobs/:id` |
+| `get_job(job_id)` | int | JSON job object | `GET /api/jobs/{job_id}` |
 | `create_job(title, home_id, ...)` | fields | JSON job object | `POST /api/jobs` |
 | `get_homes()` | none | JSON home list | `GET /api/homes` |
 | `create_home(name, address)` | fields | JSON home | `POST /api/homes` |
-| `place_bid(job_id, amount, msg)` | fields | JSON bid | `POST /api/jobs/:id/bids` |
-| `get_bids(job_id)` | int | JSON bid list | `GET /api/jobs/:id/bids` |
-| `award_bid(job_id, bid_id)` | ints | JSON job | `POST /api/jobs/:id/award` |
-| `fund_escrow(job_id, signed_tx)` | int, string | JSON job | `POST /api/jobs/:id/fund` |
-| `send_message(job_id, body, photo_ids)` | fields | JSON message | `POST /api/jobs/:id/messages` |
-| `get_messages(job_id)` | int | JSON message list | `GET /api/jobs/:id/messages` |
-| `get_photos(job_id)` | int | JSON photo list | `GET /api/jobs/:id/photos` |
-| `associate_photo(photo_id, room_id)` | ints | JSON photo | `PATCH /api/photos/:id` |
-| `confirm_job(job_id, signature)` | int, string | JSON job | `POST /api/jobs/:id/confirm` |
-| `dispute_job(job_id, reason)` | fields | JSON job | `POST /api/jobs/:id/dispute` |
+| `place_bid(job_id, amount_tinybar, msg)` | fields | JSON bid | `POST /api/jobs/{job_id}/bids` |
+| `get_bids(job_id)` | int | JSON bid list | `GET /api/jobs/{job_id}/bids` |
+| `award_bid(job_id, bid_id)` | ints | JSON job | `POST /api/jobs/{job_id}/award` |
+| `fund_escrow(job_id, signed_tx)` | int, string | JSON job | `POST /api/jobs/{job_id}/fund` |
+| `mark_ready(job_id, message)` | fields | JSON job | `POST /api/jobs/{job_id}/mark-ready` |
+| `send_message(job_id, body, photo_ids)` | fields | JSON message | `POST /api/jobs/{job_id}/messages` |
+| `get_messages(job_id)` | int | JSON message list | `GET /api/jobs/{job_id}/messages` |
+| `get_photos(job_id)` | int | JSON photo list | `GET /api/jobs/{job_id}/photos` |
+| `associate_photo(job_id, photo_id, room_id, review_status)` | fields | JSON photo | `PATCH /api/jobs/{job_id}/photos/{photo_id}` |
+| `confirm_job(job_id, signature)` | int, string | JSON job | `POST /api/jobs/{job_id}/confirm` |
+| `dispute_job(job_id, reason)` | fields | JSON job | `POST /api/jobs/{job_id}/dispute` |
 
 ### Tool registration with LangChain
 
@@ -366,12 +413,12 @@ Every tool wraps a FastAPI endpoint call via `httpx.AsyncClient`. The agent runs
 from langchain_core.tools import tool
 
 @tool
-async def place_bid(job_id: int, amount: int, message: str = "") -> dict:
+async def place_bid(job_id: int, amount_tinybar: int, message: str = "") -> dict:
     """Place a bid on a job. Amount is in tinybars."""
     async with httpx.AsyncClient() as client:
         resp = await client.post(
             f"{API_BASE}/jobs/{job_id}/bids",
-            json={"amount": amount, "message": message},
+            json={"amount_tinybar": amount_tinybar, "message": message},
             headers={"Authorization": f"Bearer {JWT}"}
         )
         return resp.json()
@@ -380,6 +427,42 @@ async def place_bid(job_id: int, amount: int, message: str = "") -> dict:
 ---
 
 ## 7. LLM Prompt Strategy
+
+### Model provider
+
+Use OpenRouter for both assistant and reviewer calls:
+
+```python
+from langchain_openrouter import ChatOpenRouter
+
+llm = ChatOpenRouter(
+    model="openai/gpt-4o",
+    temperature=0,
+)
+```
+
+Do not use `ChatOpenAI` with an OpenRouter `base_url` override. `langchain-openrouter` provides the first-party `ChatOpenRouter` integration for LangGraph, structured output, tracing, tool calling, multimodal inputs, and provider routing.
+
+For reviewer image calls, pass images as OpenRouter-compatible multimodal content blocks:
+
+```python
+from langchain_core.messages import HumanMessage
+
+message = HumanMessage(
+    content=[
+        {"type": "text", "text": prompt_text},
+        {
+            "type": "image",
+            "base64": base64_image,
+            "mime_type": "image/jpeg",
+        },
+    ],
+)
+
+response = llm.invoke([message])
+```
+
+This is the LangChain `ChatOpenRouter` shape. If calling OpenRouter's raw chat completions API directly, use the OpenAI-compatible `image_url` content part with a `data:image/jpeg;base64,...` URL.
 
 ### Assistant prompt
 
@@ -390,6 +473,8 @@ You have access to tools that mirror the app's API. Use them to fulfill requests
 
 Rules:
 - Confirm before executing destructive actions (dispute, confirm)
+- For wallet-required actions, prepare the action and let the UI collect the HashPack/x402 signature or payment
+- If `create_job` returns `402 Payment Required`, tell the UI to present the x402 payment flow and replay the request after payment
 - For bids, clarify the amount if not specified
 - If a user asks something you can't do with your tools, say so
 - Keep responses short and actionable
@@ -398,34 +483,58 @@ Current user: {user_id}
 User type: {user_type} ("owner" or "supplier")
 ```
 
-### Reviewer prompt
+### Reviewer prompt (Stage 1 — per-photo multimodal)
 
 ```
-You are the EscrowEye photo reviewer for cleaning job #{job_id}.
+You are evaluating a cleaning photo for job #{job_id}.
 
-JOB INSTRUCTIONS:
-{instructions}
+Rooms to clean: {rooms_with_ids}
 
-ROOMS TO CLEAN:
-{room_names}
+Photo data: {base64_image}
 
-The supplier has submitted photos. Review each one:
-
-PHOTOS:
-{photo_descriptions}
-
-For each photo:
-1. Identify which room it shows
-2. Does the room pass cleaning standards? Consider: visible dirt, clutter, streaks, dust
-3. If it fails, explain exactly what needs improvement
-
-Respond with valid JSON only:
+Respond in JSON only:
 {
-  "room_assignments": [{ "photo_id": 1, "room": "Kitchen" }],
-  "results": [
-    { "photo_id": 1, "room": "Kitchen", "pass": true },
-    { "photo_id": 2, "room": "Bathroom", "pass": false, "reason": "Sink has visible stains" }
-  ]
+  "room_id": 1,
+  "room_name": "Kitchen",
+  "confidence": 0.95,
+  "cleanliness_score": 3,
+  "pass": false,
+  "issues": ["Counters have visible crumbs", "Floor needs mopping"]
+}
+
+- room_id: the matching room id from the provided room list
+- room_name: the matching room name
+- confidence: 0-1 how sure you are about the room
+- cleanliness_score: 1-5 (5 = spotless)
+- pass: true if score >= 4
+- issues: list of specific problems if score < 4
+```
+
+### Reviewer prompt (Stage 2 — text-only summary)
+
+```
+You are summarizing the photo review for cleaning job #{job_id}.
+
+Rooms to clean: {rooms_with_ids}
+
+Per-photo results:
+{stage_1_results}
+
+Decide:
+- Which photos pass/fail overall
+- Associate each photo to a room
+- Overall verdict: all clean or specific retakes needed
+
+Respond in JSON only:
+{
+  "room_assignments": [
+    { "photo_id": 1, "room_id": 1, "review_status": "failed" }
+  ],
+  "overall_pass": false,
+  "retake_needed": [
+    { "room_id": 1, "room_name": "Kitchen", "reason": "Counters still dirty" }
+  ],
+  "summary": "Kitchen needs a retake. Bathroom and living room look good."
 }
 ```
 
@@ -468,9 +577,10 @@ The frontend doesn't need to know an agent exists. Same chat component renders e
 
 ### Key points for the frontend dev
 
-- Agent messages have `sender: "system"` or `sender: null` — render them with a muted style and a small robot icon.
-- When `job.status` changes to `awaiting_confirmation`, show a **Confirm Job** button that triggers `POST /api/jobs/:id/confirm` with a HashPack signature.
-- Photo upload opens the camera/file picker, then `POST /api/jobs/:id/photos` (multipart), then `POST /api/jobs/:id/messages` with the returned `photo_ids`.
+- The UI is a normal hosted shadcn-style app. The agent appears as a full-height or full-screen chat panel that can replace manual setup when the user prefers it.
+- `sender_type` values: `"human"` (normal bubble + avatar), `"agent"` (robot icon, lighter bg), `"system"` (muted banner, centered).
+- When the agent posts an all-clear message, show a **Confirm Job** button that triggers `POST /api/jobs/{job_id}/confirm` with a HashPack signature.
+- Photo upload opens the camera/file picker, then `POST /api/jobs/{job_id}/photos` (multipart), then `POST /api/jobs/{job_id}/messages` with the returned `photo_ids`.
 - The chat input can also accept plain-text commands that get routed to the assistant agent. No special parsing needed — the agent handles intent recognition.
 
 ---
@@ -486,5 +596,5 @@ backend/
 │   ├── prompts.py            # Assistant + reviewer prompt templates
 │   └── service.py            # Trigger + resume logic
 └── routers/
-    └── messages.py           # POST handler fires agent if photo_ids present
+    └── messages.py           # POST handler stores message, then fires reviewer/assistant when needed
 ```

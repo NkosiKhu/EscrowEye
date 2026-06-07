@@ -32,7 +32,7 @@ The Python SDK gives us a suite of **plugins** that map directly to Hedera servi
 | Plugin | Tools We'll Use | Why |
 |---|---|---|
 | `core_account_plugin` | `TRANSFER_HBAR_TOOL`, `CREATE_ACCOUNT_TOOL`, `GET_HBAR_BALANCE_QUERY_TOOL` | Deposit/Release HBAR, create escrow accounts |
-| `core_consensus_plugin` | `CREATE_TOPIC_TOOL`, `SUBMIT_TOPIC_MESSAGE_TOOL` | Log job state, photo CIDs, confirmations to HCS |
+| `core_consensus_plugin` | `CREATE_TOPIC_TOOL`, `SUBMIT_TOPIC_MESSAGE_TOOL` | Create per-job topics and log the three audit events |
 | `core_consensus_query_plugin` | `GET_TOPIC_MESSAGES_QUERY_TOOL` | Fetch job history / audit trail |
 | `core_token_plugin` | `ASSOCIATE_TOKEN_TOOL` | Associate HTS tokens if needed |
 | `core_misc_query_plugin` | `GET_EXCHANGE_RATE_TOOL` | HBAR → fiat conversions |
@@ -89,6 +89,27 @@ We can use policies to:
 - Block transfers before both parties confirm
 - Require HCS message submission before releasing funds
 
+### Agent Model Runtime: OpenRouter
+
+Hedera Agent Kit provides the Hedera tools. LangGraph orchestrates the agent state. OpenRouter provides the LLM runtime for both assistant and photo-review calls.
+
+Use `langchain-openrouter` and `ChatOpenRouter` instead of `ChatOpenAI` with a custom `base_url`.
+
+```python
+from langchain_openrouter import ChatOpenRouter
+
+llm = ChatOpenRouter(
+    model="openai/gpt-4o",
+    temperature=0,
+)
+```
+
+Why this route:
+- `openai/gpt-4o` supports the multimodal photo-review path.
+- OpenRouter accepts image inputs through its chat completions-compatible API. Raw OpenRouter calls use an `image_url` content part with a URL or `data:image/jpeg;base64,...` value.
+- In this project, LangGraph calls the model through `ChatOpenRouter`, so reviewer images should be sent as LangChain `HumanMessage` content blocks with `{"type": "image", "base64": image_data, "mime_type": "image/jpeg"}`.
+- `ChatOpenRouter` supports LangGraph usage patterns including tracing, structured output, tool calling, multimodal inputs, and provider routing.
+
 ---
 
 ## 2. Hedera Consensus Service (HCS)
@@ -99,23 +120,23 @@ HCS is our **audit anchor** — not a replica of app state. Only 3 events get wr
 
 | Event | HCS Message Content | When |
 |---|---|---|
-| `job_created` | `{type: "job_created", job_id, owner, supplier, amount}` | Owner posts a job |
+| `job_created` | `{type: "job_created", job_id, owner, suggested_price_tinybar}` | Owner posts a job after x402 payment |
 | `job_completed` | `{type: "job_completed", job_id, tx_hash}` | Escrow released |
 | `job_disputed` | `{type: "job_disputed", job_id}` | Either party disputes |
 
-Everything else (messages, photos, bids) lives in **SQLite only**.
+Everything else (messages, bids, photo metadata, encrypted key envelopes) lives in **SQLite**. Photo bytes live in **IPFS/Pinata**.
 
 ### Per-Job Topic Strategy
 
-Each job gets its own HCS topic. Keeps messages isolated and querying per-job history trivial.
+Each job gets its own HCS topic. This keeps audit events isolated and makes per-job audit history easy to query.
 
 ### Code
 
 ```python
-# Submit a message
-# (via agent): submit message "{\"type\":\"photo_submitted\",\"cid\":\"bafy...\",\"job_id\":\"job_001\"}" to topic 0.0.4567
+# Submit an audit event
+# (via agent): submit message "{\"type\":\"job_created\",\"job_id\":1,\"owner\":\"0.0.12345\",\"suggested_price_tinybar\":5000000000}" to topic 0.0.4567
 
-# Query messages
+# Query audit events
 # (via agent): get messages from topic 0.0.4567 with limit 50
 ```
 
@@ -199,16 +220,16 @@ Hedera supports **scheduled transactions** — create a schedule that multiple p
 
 **Docs:** https://docs.pinata.cloud/files/uploading-files
 
-Pinata is our IPFS pinning service. Photos get uploaded to IPFS, and the resulting CID is logged to HCS.
+Pinata is our IPFS pinning service. Photos get uploaded to IPFS, and the resulting CID is stored in SQLite with the job's photo metadata. CIDs are not mirrored to HCS in the MVP.
 
 ### SDK Setup
 
 ```bash
-npm install pinata
+npm install pinata-web3
 ```
 
 ```typescript
-import { PinataSDK } from "pinata";
+import { PinataSDK } from "pinata-web3";
 
 const pinata = new PinataSDK({
   pinataJwt: process.env.PINATA_JWT!,
@@ -222,33 +243,34 @@ const pinata = new PinataSDK({
 const blob = new Blob([photoBuffer], { type: "image/jpeg" });
 const file = new File([blob], "inspection-photo.jpg", { type: "image/jpeg" });
 
-const upload = await pinata.upload.public.file(file);
+const upload = await pinata.upload.file(file);
 // → { id, name, cid: "bafybeihgxdzljxb26q6nf3r3eifqeedsvt2eubqtskghpme66cgjyw4fra", ... }
 ```
 
-### Client-Side Upload (Signed URLs)
+### MVP Upload Path
 
-For large photos, avoid proxying through the backend:
+For the hackathon MVP, the frontend sends photos to the backend and the backend proxies to Pinata:
 
 ```typescript
-// Backend endpoint returns a signed URL
-const res = await fetch("/api/upload-url");
-const { url } = await res.json();
+const form = new FormData();
+form.append("photos", file);
+form.append("encrypted_keys", JSON.stringify(encryptedKeys));
 
-// Client uploads directly to Pinata
-const upload = await pinata.upload.public.file(file).url(url);
+const res = await fetch(`/api/jobs/${jobId}/photos`, {
+  method: "POST",
+  body: form,
+});
 ```
+
+Signed direct uploads can be added later if large files become a bottleneck.
 
 ### Private IPFS (Enterprise)
 
 Enterprise plan — files are not announced to the public IPFS network. Access via **temporary signed URLs**:
 
 ```typescript
-const upload = await pinata.upload.private.file(file);
-const accessUrl = await pinata.gateways.private.createAccessLink({
-  cid: upload.cid,
-  expires: 60,
-});
+// Exact API depends on the Pinata private-files product tier.
+// Keep this server-side and return short-lived access links only.
 ```
 
 **Important:** Private IPFS is server-side gating, not encryption. Photos should still be client-side encrypted.
@@ -276,7 +298,7 @@ HashPack is the Hedera wallet users connect via WalletConnect. It handles key ma
 |---|---|
 | `Transfer` | Depositing/releasing HBAR |
 | `Topic Create` | Creating per-job HCS topics |
-| `Topic Submit` | Logging messages to HCS |
+| `Topic Submit` | Logging audit events to HCS |
 | `Sign Message` | Signing confirmations ("I approve this job") |
 | `Smart Contract Execute` | If we go the smart contract route |
 
@@ -301,7 +323,7 @@ const accountId = session.accountIds[0]; // "0.0.12345"
 
 ### Signing Confirmations
 
-When a user confirms a job is complete, they sign a message that we store in HCS:
+When a user confirms a job is complete, they sign a message that the backend verifies and stores with the job confirmation record. HCS only receives the final `job_completed` audit event after escrow release.
 
 ```typescript
 const message = JSON.stringify({
@@ -328,28 +350,32 @@ x402 gates **job creation** — the owner must pay a small HBAR fee to post a jo
 Owner → POST /api/jobs → Server responds 402 with PaymentRequirements
      → Owner signs HBAR transfer to fee collector
      → Blocky402 verifies and submits to Hedera
-     → Server creates the job
+     → Frontend replays POST /api/jobs with the payment header
+     → Server creates the job and writes job_created to HCS
 ```
+
+There are no `/api/jobs/creation-fee` or callback endpoints in the canonical API. `POST /api/jobs` owns the full `402 → pay → replay → create` loop.
 
 ### Client-Side (Frontend)
 
 ```typescript
 import { x402Client } from "@x402/core/client";
-import { createClientHederaSigner } from "@x402/hedera";
 import { ExactHederaScheme } from "@x402/hedera/exact/client";
 
-const signer = createClientHederaSigner(
-  "0.0.1111",
-  privateKey,
-  { network: "hedera:testnet" }
-);
+// App wrapper around the x402 Hedera signer + HashPack/WalletConnect.
+// The browser never receives or stores the user's private key.
+const signer = await createHashPackX402Signer({
+  hederaAccountId,
+  walletConnectSession,
+  network: "hedera:testnet",
+});
 
 const client = new x402Client().register(
   "hedera:*",
   new ExactHederaScheme(signer)
 );
 
-const response = await fetch("/api/jobs", { method: "POST", body: payload });
+const response = await client.fetch("/api/jobs", { method: "POST", body: payload });
 // If 402, x402Client auto-handles the payment loop
 ```
 
@@ -395,7 +421,7 @@ EscrowEye needs a key so we can:
 │     party's Hedera public key (owner, supplier, app)  │
 │                                                       │
 │  3. Encrypted photo → IPFS (Pinata)                  │
-│     Encrypted DEKs → stored in HCS message metadata  │
+│     Encrypted DEKs → stored in SQLite photo metadata │
 │                                                       │
 │  4. Any authorized party decrypts their DEK copy      │
 │     using their private key, then decrypts the photo  │
@@ -423,7 +449,7 @@ async function encryptPhoto(photoFile: File, authorizedPublicKeys: string[]) {
   );
 
   const encryptedBlob = new Blob([iv, encryptedPhoto], { type: "application/octet-stream" });
-  const upload = await pinata.upload.public.file(
+  const upload = await pinata.upload.file(
     new File([encryptedBlob], "photo.enc")
   );
 
@@ -431,12 +457,12 @@ async function encryptPhoto(photoFile: File, authorizedPublicKeys: string[]) {
 }
 ```
 
-### Key Storage (in HCS)
+### Key Storage (SQLite photo metadata)
 
 ```json
 {
-  "type": "photo_submitted",
   "job_id": "job_001",
+  "photo_id": 1,
   "cid": "bafybeihgxdzljxb26q6nf3r3eifqeedsvt2eubqtskghpme66cgjyw4fra",
   "encrypted_keys": {
     "0.0.owner": "base64_encrypted_aes_key_for_owner",
@@ -492,11 +518,10 @@ No double-writes. No "write to SQLite AND HCS for messages." HCS is strictly the
 -- Both owners and suppliers are Users, differentiated by user_type
 CREATE TABLE users (
     id              INTEGER PRIMARY KEY,
-    email           TEXT UNIQUE NOT NULL,
-    password_hash   TEXT NOT NULL,
+    email           TEXT UNIQUE,
     user_type       TEXT NOT NULL CHECK(user_type IN ('owner', 'supplier')),
-    hedera_account  TEXT,           -- "0.0.12345"
-    hedera_pub_key  TEXT,           -- ED25519 or secp256k1 public key
+    hedera_account_id TEXT UNIQUE NOT NULL,  -- "0.0.12345"
+    hedera_public_key TEXT NOT NULL,         -- ED25519 or secp256k1 public key
     created_at      TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -522,18 +547,18 @@ CREATE TABLE jobs (
     supplier_id         INTEGER REFERENCES users(id),
     title               TEXT NOT NULL,
     description         TEXT,
-    suggested_price     INTEGER,        -- in tinybars, for display only
-    instructions        TEXT,
+    suggested_price_tinybar INTEGER,    -- in tinybars, for display only
+    access_notes        TEXT,           -- "Gate code: 1234, key under mat"
     available_times     TEXT,           -- free-text for MVP
     status              TEXT NOT NULL DEFAULT 'bidding'
                         CHECK(status IN (
                             'bidding', 'awarded', 'funded', 'in_progress',
                             'awaiting_confirmation', 'completed', 'disputed'
                         )),
-    escrow_account      TEXT,           -- "0.0.escrow"
-    hcs_topic           TEXT,           -- "0.0.topic"
+    escrow_account_id   TEXT,           -- "0.0.escrow"
+    hcs_topic_id        TEXT,           -- "0.0.topic"
     creation_fee_paid   INTEGER DEFAULT 0,
-    tx_hash             TEXT,           -- on release
+    release_tx_hash     TEXT,           -- on release
     created_at          TEXT DEFAULT CURRENT_TIMESTAMP,
     updated_at          TEXT DEFAULT CURRENT_TIMESTAMP
 );
@@ -542,7 +567,7 @@ CREATE TABLE bids (
     id              INTEGER PRIMARY KEY,
     job_id          INTEGER NOT NULL REFERENCES jobs(id),
     supplier_id     INTEGER NOT NULL REFERENCES users(id),
-    amount          INTEGER NOT NULL,   -- in tinybars
+    amount_tinybar  INTEGER NOT NULL,
     message         TEXT,
     status          TEXT NOT NULL DEFAULT 'pending'
                     CHECK(status IN ('pending', 'accepted', 'declined', 'withdrawn')),
@@ -552,7 +577,9 @@ CREATE TABLE bids (
 CREATE TABLE messages (
     id              INTEGER PRIMARY KEY,
     job_id          INTEGER NOT NULL REFERENCES jobs(id),
-    sender_id       INTEGER NOT NULL REFERENCES users(id),
+    sender_user_id  INTEGER REFERENCES users(id), -- null for agent/system
+    sender_type     TEXT NOT NULL DEFAULT 'human'
+                    CHECK(sender_type IN ('human', 'agent', 'system')),
     body            TEXT NOT NULL,
     photo_ids       TEXT,               -- JSON array of photo PKs: "[1, 2, 3]"
     created_at      TEXT DEFAULT CURRENT_TIMESTAMP
@@ -562,10 +589,13 @@ CREATE TABLE photos (
     id              INTEGER PRIMARY KEY,
     job_id          INTEGER NOT NULL REFERENCES jobs(id),
     room_id         INTEGER REFERENCES rooms(id),
-    uploaded_by     INTEGER NOT NULL REFERENCES users(id),
+    uploaded_by_user_id INTEGER NOT NULL REFERENCES users(id),
     cid             TEXT NOT NULL,       -- IPFS content hash
-    encrypted_keys  TEXT NOT NULL,       -- JSON: {"0.0.owner": "b64...", "0.0.supplier": "b64...", "0.0.app": "b64..."}
+    encrypted_keys_json TEXT NOT NULL,   -- JSON: {"0.0.owner": "b64...", "0.0.supplier": "b64...", "0.0.app": "b64..."}
     sequence        INTEGER NOT NULL,
+    review_status   TEXT NOT NULL DEFAULT 'pending'
+                    CHECK(review_status IN ('pending', 'passed', 'failed', 'needs_retake')),
+    review_notes    TEXT,
     created_at      TEXT DEFAULT CURRENT_TIMESTAMP
 );
 ```
@@ -601,7 +631,7 @@ bidding → awarded → funded → in_progress → awaiting_confirmation → com
 
 1. Signs up + links HashPack → wallet linked
 2. Browses open jobs (bidding status)
-3. Places bid (amount + optional message)
+3. Places bid (`amount_tinybar` + optional message)
 4. Gets notified on acceptance → job moves to funded after owner pays
 5. Does the work, uploads photos (encrypted → IPFS)
 6. Messages back and forth in conversational UI
@@ -637,25 +667,27 @@ The REST API *is* the agent interface. Same routes, same JSON schemas.
 ```
 POST /api/jobs              # Owner creates job — agent can do this too
 GET  /api/jobs              # List available jobs with filters
-POST /api/jobs/{id}/bid     # Supplier places bid
-POST /api/jobs/{id}/award   # Owner accepts bid
-POST /api/jobs/{id}/messages # Send message
-GET  /api/jobs/{id}/messages # Get conversation
-POST /api/jobs/{id}/confirm # Sign confirmation
-POST /api/jobs/{id}/dispute # Trigger dispute
+POST /api/jobs/{job_id}/bids       # Supplier places bid
+POST /api/jobs/{job_id}/award      # Owner accepts bid
+POST /api/jobs/{job_id}/fund       # Owner funds escrow
+POST /api/jobs/{job_id}/mark-ready # Supplier marks ready
+POST /api/jobs/{job_id}/messages   # Send message
+GET  /api/jobs/{job_id}/messages   # Get conversation
+POST /api/jobs/{job_id}/confirm    # Sign confirmation
+POST /api/jobs/{job_id}/dispute    # Trigger dispute
 ```
 
-An agent acting on behalf of a user authenticates with the same JWT and calls the same endpoints. For the hackathon, agents operate within an authenticated app session — no separate agent auth flow.
+An agent acting on behalf of a user authenticates with the same JWT and calls the same endpoints. For the hackathon, agents operate within an authenticated app session — no separate agent auth flow. Wallet-required steps remain UI-mediated: the agent can prepare `POST /api/jobs`, `fund`, or `confirm`, but HashPack/x402 signing happens in the frontend.
 
 ### Implementation
 
 ```python
 # POST /api/auth/login
-# Body: { account_id: "0.0.12345", signature: "base64...", message: "..." }
-# Backend recovers public key from signature, checks it matches account_id
-# Issues JWT with { sub: user_id, account_id, role }
+# Body: { hedera_account_id: "0.0.12345", hedera_public_key: "...", signature: "base64...", nonce: "..." }
+# Backend verifies the signature and account ownership
+# Issues JWT with { sub: user_id, hedera_account_id, role }
 
-# POST /api/auth/wallet-challenge
+# POST /api/auth/challenge
 # Returns a nonce for the user to sign with HashPack
 ```
 
@@ -687,7 +719,7 @@ Internet → Hetzner Firewall → VPS
 | **Backend** | FastAPI with Uvicorn, served behind Caddy |
 | **Frontend** | Built to static files, served by Caddy or nginx |
 | **HBAR node** | Backend connects to Hedera testnet (dev) / mainnet (prod) |
-| **Env vars** | `.env` file on server: PINATA_JWT, HEDERA keys, JWT_SECRET, etc. |
+| **Env vars** | `.env` file on server: OPENROUTER_API_KEY, PINATA_JWT, HEDERA keys, JWT_SECRET, etc. |
 | **Backups** | `sqlite3 .backup` + `scp`/`rsync` to offsite, or Hetzner Storage Box |
 
 ### docker-compose.prod.yml
@@ -735,14 +767,14 @@ docker compose -f docker-compose.prod.yml up -d
 │                                                                      │
 │  1. OWNER POSTS JOB                                                  │
 │     ────────────────                                                 │
-│     Owner fills job form (home, description, suggested_price)        │
+│     Owner fills job form (home, description, suggested_price_tinybar)│
 │     → x402/Blocky402 gates with ~£10 flat creation fee              │
 │     → Job saved to SQLite (status: bidding)                         │
 │     → HCS: { type: "job_created", job_id }                          │
 │                                                                      │
 │  2. SUPPLIERS BID                                                    │
 │     ───────────────                                                   │
-│     Suppliers browse open jobs → place bids (amount + message)       │
+│     Suppliers browse open jobs → place bids (amount_tinybar + msg)   │
 │     → SQLite: bids saved, visible to all on job page                │
 │     → Owner sees bids, picks one                                    │
 │     → bid.status = accepted, job.status = awarded                   │
@@ -754,7 +786,7 @@ docker compose -f docker-compose.prod.yml up -d
 │     → via HashPack signature                                        │
 │     → Escrow account created (2-of-3: owner + supplier + app)       │
 │     → HBAR transferred in                                            │
-│     → SQLite: job.status = funded, escrow_account saved             │
+│     → SQLite: job.status = funded, escrow_account_id saved          │
 │                                                                      │
 │  4. INSPECTION & PHOTOS                                              │
 │     ──────────────────────                                           │
@@ -827,28 +859,85 @@ docker compose -f docker-compose.prod.yml up -d
 
 ## Quick Dependency Summary
 
-### Backend (Python)
+### Frontend
 
-```
-fastapi               # REST API
-uvicorn               # ASGI server
-hiero-sdk-python      # Hedera SDK
-hedera-agent-kit      # AI agent tools
-sqlite3               # built-in, via aiosqlite or sqlmodel
-python-jose           # JWT creation/verification
-passlib / bcrypt      # password hashing
-cryptography          # server-side ECIES decryption
-httpx                 # HTTP client for Blocky402, Pinata API
-python-multipart      # file uploads
+#### UI
+
+```bash
+npm install tailwindcss @tailwindcss/vite
+npx shadcn@latest init
 ```
 
-### Frontend (TypeScript)
+`shadcn/ui` pulls in the usual UI utilities as needed, including `lucide-react`, `class-variance-authority`, `clsx`, `tailwind-merge`, and animation helpers.
 
+#### API & State
+
+```bash
+npm install @tanstack/react-query @tanstack/react-query-devtools axios
 ```
-pinata                                       # IPFS uploads
-@hashgraph/hedera-wallet-connect             # HashPack integration
-@x402/core + @x402/hedera                    # x402 payment client
-@noble/curves                                # ECIES encryption for DEKs
-react-router-dom                             # routing
-axios or react-query                         # API client
+
+#### Forms
+
+```bash
+npm install react-hook-form @hookform/resolvers zod
+```
+
+#### Routing
+
+```bash
+npm install react-router-dom
+```
+
+#### Utilities
+
+```bash
+npm install react-dropzone date-fns sonner
+```
+
+#### Wallet / Crypto
+
+```bash
+npm install @hashgraph/hedera-wallet-connect @hashgraph/sdk
+npm install @x402/core @x402/hedera
+npm install @noble/curves pinata-web3
+```
+
+### Backend
+
+#### API
+
+```bash
+pip install fastapi "uvicorn[standard]" python-multipart httpx "python-jose[cryptography]"
+```
+
+#### Database
+
+```bash
+pip install "sqlalchemy[asyncio]" aiosqlite alembic pydantic-settings
+```
+
+#### Security
+
+```bash
+pip install "passlib[bcrypt]" cryptography
+```
+
+#### Agent / AI
+
+```bash
+pip install langgraph langchain-core langchain-openrouter Pillow
+```
+
+Use `ChatOpenRouter` from `langchain-openrouter` with `model="openai/gpt-4o"` for the multimodal reviewer. Resize images with Pillow before base64 encoding.
+
+#### Hedera
+
+```bash
+pip install hiero-sdk-python hedera-agent-kit
+```
+
+#### Dev
+
+```bash
+pip install python-dotenv pytest pytest-asyncio httpx loguru
 ```

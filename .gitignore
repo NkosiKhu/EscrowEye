@@ -224,7 +224,11 @@ build/
 *.tsbuildinfo
 
 opencode.json
+creds
+creds/
+backend/escroweye.sqlite3
+backend/uploads/
+.playwright-mcp/
 
 # macOS
 .DS_Store
-
