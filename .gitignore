@@ -224,3 +224,7 @@ build/
 *.tsbuildinfo
 
 opencode.json
+
+# macOS
+.DS_Store
+
