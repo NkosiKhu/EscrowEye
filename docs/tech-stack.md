@@ -93,22 +93,21 @@ We can use policies to:
 
 ## 2. Hedera Consensus Service (HCS)
 
-HCS is our **audit log**. Every event in a job lifecycle gets written as a message to a HCS topic.
+HCS is our **audit anchor** — not a replica of app state. Only 3 events get written to HCS.
 
-### What We'll Log
+### What We'll Log (exactly)
 
-| Event | HCS Message Content |
-|---|---|
-| Job created | `{type: "job_created", job_id, owner, supplier, amount}` |
-| Photo submitted | `{type: "photo_submitted", job_id, cid, supplier}` |
-| Clarification requested | `{type: "clarification_requested", job_id, message, by}` |
-| Clarification replied | `{type: "clarification_replied", job_id, message, by}` |
-| Party confirmed | `{type: "party_confirmed", job_id, party}` |
-| Escrow released | `{type: "escrow_released", job_id, tx_id, amount}` |
+| Event | HCS Message Content | When |
+|---|---|---|
+| `job_created` | `{type: "job_created", job_id, owner, supplier, amount}` | Owner posts a job |
+| `job_completed` | `{type: "job_completed", job_id, tx_hash}` | Escrow released |
+| `job_disputed` | `{type: "job_disputed", job_id}` | Either party disputes |
+
+Everything else (messages, photos, bids) lives in **SQLite only**.
 
 ### Per-Job Topic Strategy
 
-Each inspection job gets its own HCS topic. This keeps messages isolated and makes querying per-job history trivial.
+Each job gets its own HCS topic. Keeps messages isolated and querying per-job history trivial.
 
 ### Code
 
@@ -459,79 +458,154 @@ async function encryptPhoto(photoFile: File, authorizedPublicKeys: string[]) {
 
 ## 8. Traditional vs Hedera Storage — What Lives Where
 
-Not everything belongs on-ledger. Here's the split.
+Not everything belongs on-ledger. HCS is lightweight — it only stores **critical state transitions** (proof a job was created, completed, paid out). Everything else lives in SQLite.
 
 | Data | Store | Why |
 |---|---|---|
 | **User accounts** (email, profile, wallet addr) | **SQLite** | Private, frequently updated, needs indexing |
 | **Jobs** (title, description, status, price, address) | **SQLite** | Needs full-text search, filtering, fast reads |
-| **Job<->Supplier relationships** (bids, assignments) | **SQLite** | Relational joins, status tracking |
-| **Messages / clarifications** | **SQLite** (primary) + **HCS** (audit) | Chat history in SQLite for the UI; hash + HCS for tamper-proof record |
-| **Photo CIDs + encrypted DEKs** | **HCS** (immutable log) | Must be tamper-proof — links photo to job permanently |
-| **Escrow account IDs + amounts** | **SQLite** (ref) + **HCS** (log) | SQLite for display; HCS for the canonical audit trail |
-| **Confirmations / signatures** | **HCS** | Immutable proof of consent |
-| **HBAR transactions / releases** | **HCS** | On-ledger record of every transfer |
-| **Photo files** | **IPFS / Pinata** | Content-addressed storage, encrypted |
+| **Bids** | **SQLite** | Relational joins, supplier queries, owner comparison |
+| **Messages / clarifications** | **SQLite** | Conversational UI — needs fast reads/writes, no on-chain benefit |
+| **Photo CIDs + encrypted DEKs** | **SQLite** (reference) + **IPFS** (blob) | CIDs stored in SQLite alongside jobs; IPFS for the actual bytes |
+| **Photo files** | **IPFS / Pinata** | Content-addressed storage, encrypted client-side |
+| **Escrow account IDs + amounts** | **SQLite** | App state; the on-ledger balance is the real source of truth |
+| **Job created event** | **HCS** | Immutable proof of creation |
+| **Job completed event** | **HCS** | Immutable proof of successful payout |
+| **Job disputed event** | **HCS** | Immutable proof of dispute |
+| **HBAR transaction hash** | **HCS** | Links on-ledger payout to the job record |
 
-**The rule of thumb:**
-- If it needs to be queried, joined, or searched → **SQLite**
-- If it needs to be provably tamper-proof → **HCS**
-- If it's a file → **IPFS**, with its CID in HCS
+**The split:**
 
-SQLite is the **source of truth for app state**. HCS is the **source of truth for audit**. They complement each other — we write to both when appropriate.
+- **SQLite** — source of truth for app state (users, jobs, bids, messages, photos, everything the UI touches)
+- **HCS** — tamper-proof seal on exactly 3 events: `job_created`, `job_completed` (with tx hash), `job_disputed`
+- **IPFS** — encrypted photo blobs, nothing else
+
+No double-writes. No "write to SQLite AND HCS for messages." HCS is strictly the audit anchor, not a replica of app state.
 
 ---
 
 ## 9. Entity Model
 
+### Schema
+
+```sql
+-- Both owners and suppliers are Users, differentiated by user_type
+CREATE TABLE users (
+    id              INTEGER PRIMARY KEY,
+    email           TEXT UNIQUE NOT NULL,
+    password_hash   TEXT NOT NULL,
+    user_type       TEXT NOT NULL CHECK(user_type IN ('owner', 'supplier')),
+    hedera_account  TEXT,           -- "0.0.12345"
+    hedera_pub_key  TEXT,           -- ED25519 or secp256k1 public key
+    created_at      TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE homes (
+    id              INTEGER PRIMARY KEY,
+    owner_id        INTEGER NOT NULL REFERENCES users(id),
+    name            TEXT NOT NULL,  -- "My Beach House"
+    address         TEXT NOT NULL,
+    created_at      TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE rooms (
+    id              INTEGER PRIMARY KEY,
+    home_id         INTEGER NOT NULL REFERENCES homes(id),
+    name            TEXT NOT NULL,  -- "Kitchen", "Master Bedroom"
+    sq_meters       REAL
+);
+
+CREATE TABLE jobs (
+    id                  INTEGER PRIMARY KEY,
+    owner_id            INTEGER NOT NULL REFERENCES users(id),
+    home_id             INTEGER NOT NULL REFERENCES homes(id),
+    supplier_id         INTEGER REFERENCES users(id),
+    title               TEXT NOT NULL,
+    description         TEXT,
+    suggested_price     INTEGER,        -- in tinybars, for display only
+    instructions        TEXT,
+    available_times     TEXT,           -- free-text for MVP
+    status              TEXT NOT NULL DEFAULT 'bidding'
+                        CHECK(status IN (
+                            'bidding', 'awarded', 'funded', 'in_progress',
+                            'awaiting_confirmation', 'completed', 'disputed'
+                        )),
+    escrow_account      TEXT,           -- "0.0.escrow"
+    hcs_topic           TEXT,           -- "0.0.topic"
+    creation_fee_paid   INTEGER DEFAULT 0,
+    tx_hash             TEXT,           -- on release
+    created_at          TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at          TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE bids (
+    id              INTEGER PRIMARY KEY,
+    job_id          INTEGER NOT NULL REFERENCES jobs(id),
+    supplier_id     INTEGER NOT NULL REFERENCES users(id),
+    amount          INTEGER NOT NULL,   -- in tinybars
+    message         TEXT,
+    status          TEXT NOT NULL DEFAULT 'pending'
+                    CHECK(status IN ('pending', 'accepted', 'declined', 'withdrawn')),
+    created_at      TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE messages (
+    id              INTEGER PRIMARY KEY,
+    job_id          INTEGER NOT NULL REFERENCES jobs(id),
+    sender_id       INTEGER NOT NULL REFERENCES users(id),
+    body            TEXT NOT NULL,
+    photo_ids       TEXT,               -- JSON array of photo PKs: "[1, 2, 3]"
+    created_at      TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE photos (
+    id              INTEGER PRIMARY KEY,
+    job_id          INTEGER NOT NULL REFERENCES jobs(id),
+    room_id         INTEGER REFERENCES rooms(id),
+    uploaded_by     INTEGER NOT NULL REFERENCES users(id),
+    cid             TEXT NOT NULL,       -- IPFS content hash
+    encrypted_keys  TEXT NOT NULL,       -- JSON: {"0.0.owner": "b64...", "0.0.supplier": "b64...", "0.0.app": "b64..."}
+    sequence        INTEGER NOT NULL,
+    created_at      TEXT DEFAULT CURRENT_TIMESTAMP
+);
 ```
-┌──────────────┐     ┌──────────────────┐     ┌──────────────┐
-│  Owner       │     │      Job         │     │  Supplier    │
-│──────────────│     │──────────────────│     │──────────────│
-│ id           │────>│ id               │<────│ id           │
-│ email        │     │ owner_id         │     │ email        │
-│ hedera_acct  │     │ title            │     │ hedera_acct  │
-│ created_at   │     │ description      │     │ created_at   │
-└──────────────┘     │ property_addr    │     └──────────────┘
-                     │ status           │
-                     │ escrow_amount    │
-                     │ escrow_acct_id   │
-                     │ hcs_topic_id     │
-                     │ created_at       │
-                     │ updated_at       │
-                     └──────────────────┘
-                          │        │
-                          │        └──────────────────┐
-                          ▼                           ▼
-                     ┌──────────┐              ┌──────────────┐
-                     │  Photo   │              │  Clarification │
-                     │──────────│              │────────────────│
-                     │ id       │              │ id             │
-                     │ job_id   │              │ job_id         │
-                     │ cid      │              │ from (owner/   │
-                     │ enc_keys │              │      supplier) │
-                     │ seq      │              │ message        │
-                     └──────────┘              │ created_at     │
-                                               └──────────────┘
+
+### Status Flow
+
 ```
+bidding → awarded → funded → in_progress → awaiting_confirmation → completed
+                                                                        ↕
+                                                                    disputed
+```
+
+1. **bidding** — Owner posted job (creation fee paid via x402). Suppliers place bids.
+2. **awarded** — Owner accepted a bid → supplier is assigned.
+3. **funded** — Owner paid bid amount into the 2-of-3 escrow account.
+4. **in_progress** — Supplier does the work, uploads photos, messages flow.
+5. **awaiting_confirmation** — All photos submitted, waiting on owner sign-off.
+6. **completed** — Both parties confirmed → HBAR released to supplier.
+7. **disputed** — Either party hit the dispute button → simple toggle.
 
 ### Owner Flow
 
-1. Signs up (email + links HashPack wallet)
-2. Posts a job (title, description, property address, escrow amount)
-3. Funds the escrow account (HBAR via HashPack)
-4. Reviews photos from supplier
-5. Requests clarifications
-6. Confirms job complete → releases HBAR
+1. Signs up + links HashPack → wallet linked
+2. Creates home (name, address, rooms)
+3. Posts job (selects home, adds description + suggested price)
+4. Pays ~£10 creation fee via x402
+5. Views bids on job page → accepts one
+6. Pays bid amount into escrow via HashPack
+7. Reviews photos + messages in conversational UI
+8. Confirms completion → HBAR released to supplier
 
 ### Supplier Flow
 
-1. Signs up (email + links HashPack wallet)
-2. Browses available jobs
-3. Selects / bids on a job
-4. Submits inspection photos (encrypted → IPFS)
-5. Responds to clarification requests
-6. Confirms job complete → receives HBAR
+1. Signs up + links HashPack → wallet linked
+2. Browses open jobs (bidding status)
+3. Places bid (amount + optional message)
+4. Gets notified on acceptance → job moves to funded after owner pays
+5. Does the work, uploads photos (encrypted → IPFS)
+6. Messages back and forth in conversational UI
+7. Confirms completion → receives HBAR
 
 ---
 
@@ -555,6 +629,23 @@ SQLite is the **source of truth for app state**. HCS is the **source of truth fo
 - **HashPack / wallet signatures** prove Hedera account ownership for high-value actions (funding, confirming, releasing)
 - Low-value actions (browsing jobs, viewing profiles) require only JWT
 - High-value actions (transfers, confirmations) require JWT + a fresh HashPack signature
+
+### Agent-Friendly API
+
+The REST API *is* the agent interface. Same routes, same JSON schemas.
+
+```
+POST /api/jobs              # Owner creates job — agent can do this too
+GET  /api/jobs              # List available jobs with filters
+POST /api/jobs/{id}/bid     # Supplier places bid
+POST /api/jobs/{id}/award   # Owner accepts bid
+POST /api/jobs/{id}/messages # Send message
+GET  /api/jobs/{id}/messages # Get conversation
+POST /api/jobs/{id}/confirm # Sign confirmation
+POST /api/jobs/{id}/dispute # Trigger dispute
+```
+
+An agent acting on behalf of a user authenticates with the same JWT and calls the same endpoints. For the hackathon, agents operate within an authenticated app session — no separate agent auth flow.
 
 ### Implementation
 
@@ -644,68 +735,61 @@ docker compose -f docker-compose.prod.yml up -d
 │                                                                      │
 │  1. OWNER POSTS JOB                                                  │
 │     ────────────────                                                 │
-│     Owner fills job form + sets HBAR escrow amount                   │
-│     → x402/Blocky402 gates with a small creation fee                │
-│     → Job saved to SQLite (status: open)                            │
-│     → HCS topic created, escrow account created (2-of-3 key)        │
-│     → HCS: { type: "job_created", job_id, topic, escrow_account }   │
+│     Owner fills job form (home, description, suggested_price)        │
+│     → x402/Blocky402 gates with ~£10 flat creation fee              │
+│     → Job saved to SQLite (status: bidding)                         │
+│     → HCS: { type: "job_created", job_id }                          │
 │                                                                      │
-│  2. SUPPLIER SELECTS JOB                                             │
-│     ─────────────────────                                            │
-│     Supplier browses open jobs in UI (reads from SQLite)             │
-│     → Supplier selects job → SQLite: job.status = "assigned"        │
-│     → HCS: { type: "job_assigned", job_id, supplier }               │
+│  2. SUPPLIERS BID                                                    │
+│     ───────────────                                                   │
+│     Suppliers browse open jobs → place bids (amount + message)       │
+│     → SQLite: bids saved, visible to all on job page                │
+│     → Owner sees bids, picks one                                    │
+│     → bid.status = accepted, job.status = awarded                   │
+│     → supplier_id set on job                                        │
 │                                                                      │
 │  3. OWNER FUNDS ESCROW                                               │
 │     ────────────────────                                             │
-│     Owner sends HBAR to escrow account via HashPack                  │
-│     → Backend detects balance change via mirror node query           │
-│     → SQLite: job.status = "funded"                                 │
-│     → HCS: { type: "escrow_funded", amount }                        │
+│     Owner pays accepted bid amount into 2-of-3 escrow account        │
+│     → via HashPack signature                                        │
+│     → Escrow account created (2-of-3: owner + supplier + app)       │
+│     → HBAR transferred in                                            │
+│     → SQLite: job.status = funded, escrow_account saved             │
 │                                                                      │
 │  4. INSPECTION & PHOTOS                                              │
 │     ──────────────────────                                           │
-│     Supplier visits property, takes photos                           │
+│     Supplier does the work, takes photos                             │
 │     → Photos encrypted in browser (AES-256-GCM)                     │
-│     → Encrypted photos uploaded to Pinata IPFS                       │
-│     → Encrypted DEKs stored per party (owner, supplier, app)        │
-│     → Uploaded via signed URL (server-generated, client-consumed)   │
-│     → HCS: { type: "photo_submitted", cid, encrypted_keys }         │
-│     → SQLite: photo record saved (cid, job_id, seq)                 │
+│     → Encrypted photos uploaded to Pinata IPFS (via signed URL)     │
+│     → Encrypted DEKs for owner + supplier + app                     │
+│     → SQLite: photo records saved (cid, job_id, seq)               │
+│     → Photos attached to messages via photo_ids JSON array          │
+│     → SQLite: job.status = in_progress                               │
 │                                                                      │
-│  5. CLARIFICATIONS                                                   │
-│     ───────────────                                                   │
-│     Owner requests more photos in UI                                 │
-│     → SQLite: clarification saved                                   │
-│     → HCS: { type: "clarification_requested", message }              │
-│     → Supplier replies or submits more photos                        │
-│     → HCS: { type: "clarification_replied", message }               │
+│  5. CONVERSATIONAL UI                                                │
+│     ───────────────────                                               │
+│     Owner reviews photos, sends messages                             │
+│     → Supplier replies, uploads more photos                          │
+│     → All stored in SQLite messages + photos tables                 │
+│     → No HCS writes for chat                                        │
 │                                                                      │
 │  6. BOTH CONFIRM                                                     │
 │     ──────────────                                                   │
-│     Owner confirms via HashPack signature                            │
-│     → HCS: { type: "party_confirmed", party: "owner" }               │
-│     → SQLite: owner_confirmed = true                                 │
-│     Supplier confirms via HashPack signature                         │
-│     → HCS: { type: "party_confirmed", party: "supplier" }            │
-│     → SQLite: supplier_confirmed = true                              │
+│     Supplier clicks "Done" → job.status = awaiting_confirmation     │
+│     Owner reviews in conversational UI                              │
+│     → Owner clicks "Confirm" (HashPack signature)                   │
+│     → Both signatures collected                                     │
+│     → 2-of-3 threshold met → TransferTransaction submitted           │
+│     → HBAR released to supplier                                     │
+│     → SQLite: job.status = completed                                 │
+│     → HCS: { type: "job_completed", job_id, tx_hash }               │
 │                                                                      │
-│  7. ESCROW RELEASED                                                  │
-│     ─────────────────                                                 │
-│     Once both confirmed, backend constructs TransferTransaction      │
-│     → Owner signs via HashPack                                       │
-│     → Supplier signs (or EscrowEye signs if owner+app path)         │
-│     → 2-of-3 threshold met → transaction submitted to Hedera         │
-│     → HBAR released to supplier's account                            │
-│     → SQLite: job.status = "completed"                               │
-│     → HCS: { type: "escrow_released", tx_id, amount }               │
-│                                                                      │
-│  8. DISPUTE (edge case)                                              │
-│     ────────────────                                                  │
-│     If parties can't agree, EscrowEye uses its key to arbitrate      │
-│     → EscrowEye signs + one party signs → 2-of-3 reached            │
-│     → Funds released per resolution                                  │
-│     → HCS: { type: "dispute_resolved", resolution }                  │
+│  7. DISPUTE                                                          │
+│     ────────                                                        │
+│     Either party clicks "Dispute"                                    │
+│     → SQLite: job.status = disputed                                  │
+│     → HCS: { type: "job_disputed", job_id }                         │
+│     → EscrowEye can arbitrate using its 2-of-3 key                  │
 │                                                                      │
 └─────────────────────────────────────────────────────────────────────┘
 ```
@@ -716,10 +800,10 @@ docker compose -f docker-compose.prod.yml up -d
 |---|---|
 | **React Frontend** | HashPack (WalletConnect), Pinata (upload), FastAPI backend (REST/JWT) |
 | **FastAPI Backend** | Hedera Agent Kit (HCS, transfers), Blocky402 (verify/settle), SQLite, Pinata (signed URLs) |
-| **SQLite** | App state: users, jobs, photos, clarifications |
-| **HCS** | Immutable audit log: job events, confirmations, transfers |
+| **SQLite** | App state: users, homes, rooms, jobs, bids, messages, photos |
+| **HCS** | Exactly 3 events: job_created, job_completed, job_disputed |
 | **Escrow Account** | 2-of-3 threshold key account on Hedera |
-| **IPFS / Pinata** | Encrypted photo storage, CIDs in HCS |
+| **IPFS / Pinata** | Encrypted photo storage, CIDs referenced in SQLite |
 | **HashPack** | Transaction signing, message signing, key management |
 
 ---
@@ -733,7 +817,11 @@ docker compose -f docker-compose.prod.yml up -d
 | **Deployment target** | Hetzner VPS, Docker Compose, Caddy reverse proxy |
 | **Storage** | SQLite for app state, HCS for audit, IPFS for files |
 | **Encryption keyholders** | Owner + Supplier + EscrowEye (for moderation/disputes) |
-| **Entity model** | Owner, Supplier, Job, Photo, Clarification |
+| **Entity model** | User (owner/supplier), Home, Room, Job, Bid, Message (photo_ids as JSON), Photo |
+| **Agent interface** | Same REST API as the web UI — agents use the same endpoints with a JWT |
+| **HCS scope** | Exactly 3 events: job_created, job_completed (with tx hash), job_disputed |
+| **Creation fee** | ~£10 flat x402 fee paid by owner when posting a job |
+| **Bidding** | Open bids visible to all suppliers; owner picks one |
 
 ---
 
