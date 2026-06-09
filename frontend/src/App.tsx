@@ -1,194 +1,199 @@
-import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ApiError, apiRequest } from "./api";
+import { asArray, formatDate, hbarToTinybar, statusLabel, tinybarToHbar, truncateMiddle } from "./format";
+import type { ApiUser, AuditEvent, Bid, Home, JobDetail, JobStatus, JobSummary, Message, PaymentRequirements, Photo, ServiceCategory, UserType, WorkerResult } from "./types";
 import "./styles.css";
 
-const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000").replace(/\/$/, "");
-
-type UserType = "owner" | "supplier";
-type JobStatus =
-  | "bidding"
-  | "awarded"
-  | "funded"
-  | "in_progress"
-  | "awaiting_confirmation"
-  | "completed"
-  | "disputed";
-type SenderType = "human" | "agent" | "system";
-
-type ApiUser = {
-  id: number;
-  email?: string;
-  user_type: UserType;
-  hedera_account_id: string;
-  hedera_public_key: string;
+type Profile = {
+  firstName: string;
+  lastName: string;
+  location: string;
+  serviceArea: string;
+  photoUrl: string;
+  paymentToken: "HBAR" | "Hedera token";
 };
 
-type Room = { id: number; name: string; sq_meters: number };
-type Home = { id: number; name: string; address: string; rooms: Room[] };
-type Party = { id: number; hedera_account_id: string };
-type JobSummary = {
+type OwnerView = "browse" | "requests" | "messages" | "profile";
+type SupplierView = "jobs" | "earnings" | "messages" | "profile";
+type JobTab = "offers" | "active" | "archived";
+type RequestStep = "need" | "schedule" | "budget" | "summary" | "sent";
+type QuoteState = { job: JobSummary; amount: string } | null;
+type PendingServicePayment = { payload: ServiceRequestPayload; requirements: PaymentRequirements };
+
+type WorkerProfile = {
   id: number;
+  name: string;
+  profession: string;
+  rating: string;
+  rate: string;
+  location: string;
+  image: string;
+  jobs: number;
+};
+type ServiceRequestPayload = {
   title: string;
   description: string;
-  suggested_price_tinybar: number;
-  status: JobStatus;
-  home: Pick<Home, "id" | "name" | "address">;
-  owner: Party;
-  supplier: Party | null;
-  bid_count?: number;
-  lowest_bid_tinybar?: number | null;
-  created_at?: string;
+  address: string;
+  location_description: string;
+  schedule: string;
+  budget_amount: number;
+  category: string;
 };
-type JobDetail = JobSummary & {
-  access_notes?: string;
-  available_times?: string;
-  escrow_account_id?: string;
-  hcs_topic_id?: string;
-  accepted_bid?: { id: number; amount_tinybar: number } | null;
-  creation_fee_paid?: boolean;
-  updated_at?: string;
+
+type WorkspaceData = {
+  job: JobDetail | null;
+  bids: Bid[];
+  photos: Photo[];
+  messages: Message[];
+  auditEvents: AuditEvent[];
 };
-type Bid = {
-  id: number;
-  supplier?: Party;
-  amount_tinybar: number;
-  message?: string;
-  status: string;
-  created_at?: string;
-};
-type Photo = {
-  id: number;
-  cid: string;
-  room?: Pick<Room, "id" | "name"> | null;
-  uploaded_by?: Party;
-  sequence: number;
-  review_status?: "pending" | "passed" | "failed" | "needs_retake";
-  review_notes?: string;
-  created_at?: string;
-};
-type Message = {
-  id: number;
-  sender_user_id: number | null;
-  sender: (Party & { user_type?: UserType }) | null;
-  sender_type: SenderType;
-  body: string;
-  photo_ids: number[];
-  photos?: Pick<Photo, "id" | "cid" | "sequence">[];
-  created_at?: string;
-};
-type AuditEvent = {
-  type: "job_created" | "job_completed" | "job_disputed";
-  job_id: number;
-  sequence_number: number;
-  consensus_timestamp: string;
-  tx_hash?: string;
-};
-type PaymentRequirements = {
-  scheme: string;
-  network: string;
-  amount: string;
-  asset: string;
-  payTo: string;
-  maxTimeoutSeconds: number;
-  extra?: Record<string, string>;
-};
-type PendingJobPayment = {
-  payload: JobForm;
-  requirements: PaymentRequirements;
-};
-type JobForm = {
-  home_id: number;
+
+type RequestDraft = {
   title: string;
   description: string;
-  suggested_price_tinybar: number;
-  access_notes: string;
-  available_times: string;
+  schedule: string;
+  budgetHbar: string;
+  notes: string;
 };
 
-class ApiError extends Error {
-  status: number;
-  body: unknown;
+const defaultProfile: Profile = {
+  firstName: "",
+  lastName: "",
+  location: "Ikoyi, Lagos",
+  serviceArea: "Lagos Island",
+  photoUrl: "https://images.unsplash.com/photo-1544723795-3fb6469f5b39?auto=format&fit=crop&w=200&q=80",
+  paymentToken: "HBAR",
+};
 
-  constructor(status: number, body: unknown) {
-    super(typeof body === "object" && body && "error" in body ? String(body.error) : `HTTP ${status}`);
-    this.status = status;
-    this.body = body;
-  }
+const emptyWorkspace: WorkspaceData = {
+  job: null,
+  bids: [],
+  photos: [],
+  messages: [],
+  auditEvents: [],
+};
+
+const serviceCategories = ["Cleaning", "Pool cleaning", "Maintenance", "Airbnb turnover", "Carpentry", "Plumbing", "Electrical repairs", "Handyman"];
+
+const workers: WorkerProfile[] = [
+  {
+    id: 1,
+    name: "Chijioke Nwosu",
+    profession: "Expert window washing",
+    rating: "4.8",
+    rate: "From ₦80k",
+    location: "Ikoyi",
+    jobs: 128,
+    image: "https://images.unsplash.com/photo-1503387762-592deb58ef4e?auto=format&fit=crop&w=500&q=80",
+  },
+  {
+    id: 2,
+    name: "Kurt Kanu",
+    profession: "Post-construction cleaning",
+    rating: "5.0",
+    rate: "From ₦120k",
+    location: "Victoria Island",
+    jobs: 91,
+    image: "https://images.unsplash.com/photo-1580894894513-541e068a3e2b?auto=format&fit=crop&w=500&q=80",
+  },
+  {
+    id: 3,
+    name: "Favour Bello",
+    profession: "Airbnb turnover specialist",
+    rating: "4.9",
+    rate: "From ₦65k",
+    location: "Surulere",
+    jobs: 74,
+    image: "https://images.unsplash.com/photo-1565347878134-064b9185ced8?auto=format&fit=crop&w=500&q=80",
+  },
+];
+
+const sampleJobs = [
+  {
+    title: "Window cleaning services for 2 newly built two-storey buildings",
+    address: "10b Gerrard Road, Ikoyi, Lagos",
+    date: "Sat, 1 Mar 2025",
+    amount: "₦200,000",
+  },
+  {
+    title: "Post-construction cleaning for a commercial office space",
+    address: "45 Adeola Odeku Street, Victoria Island, Lagos",
+    date: "Tue, 4 Mar 2025",
+    amount: "₦300,000",
+  },
+  {
+    title: "Deep cleaning services for a newly renovated residential home",
+    address: "78 Alhaji Kola Street, Surulere, Lagos",
+    date: "Fri, 7 Mar 2025",
+    amount: "₦120,000",
+  },
+];
+
+function workerFromApi(worker: WorkerResult): WorkerProfile {
+  return {
+    id: worker.id,
+    name: worker.name,
+    profession: worker.profession,
+    rating: String(worker.rating),
+    rate: worker.average_rate,
+    location: worker.location,
+    image: worker.profile_image,
+    jobs: worker.completed_jobs,
+  };
 }
 
-function asArray<T>(value: unknown, key: string): T[] {
-  if (Array.isArray(value)) return value as T[];
-  if (value && typeof value === "object" && key in value) {
-    const nested = (value as Record<string, unknown>)[key];
-    return Array.isArray(nested) ? (nested as T[]) : [];
-  }
-  return [];
-}
-
-function tinybarToHbar(tinybar?: number | null) {
-  if (!tinybar) return "0";
-  return (tinybar / 100_000_000).toLocaleString(undefined, { maximumFractionDigits: 4 });
-}
-
-function hbarToTinybar(hbar: string) {
-  const value = Number.parseFloat(hbar || "0");
-  return Math.round((Number.isFinite(value) ? value : 0) * 100_000_000);
-}
-
-function formatDate(value?: string) {
-  if (!value) return "No timestamp";
-  return new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
-}
-
-function statusLabel(status?: string) {
-  return (status ?? "unknown").replace(/_/g, " ");
-}
-
-function useApi(token: string | null) {
-  return useCallback(
-    async <T,>(path: string, options: RequestInit = {}): Promise<T> => {
-      const headers = new Headers(options.headers);
-      const hasBody = options.body !== undefined;
-      if (hasBody && !(options.body instanceof FormData) && !headers.has("Content-Type")) {
-        headers.set("Content-Type", "application/json");
-      }
-      if (token) headers.set("Authorization", `Bearer ${token}`);
-
-      const response = await fetch(`${API_BASE}${path}`, { ...options, headers });
-      if (response.status === 204) return undefined as T;
-
-      const contentType = response.headers.get("Content-Type") ?? "";
-      const body = contentType.includes("application/json") ? await response.json() : await response.text();
-      if (!response.ok) throw new ApiError(response.status, body);
-      return body as T;
-    },
-    [token],
-  );
+function photoFromProof(proof: Partial<Photo> & { storage_url?: string; validation_status?: string; file_type?: string }): Photo {
+  return {
+    id: Number(proof.id ?? 0),
+    cid: String(proof.cid ?? ""),
+    sequence: Number(proof.sequence ?? proof.id ?? 0),
+    review_status: proof.review_status ?? (proof.validation_status === "passed" ? "passed" : "pending"),
+    review_notes: proof.review_notes ?? proof.file_type ?? null,
+    created_at: proof.created_at,
+  };
 }
 
 function App() {
   const [token, setToken] = useState(() => localStorage.getItem("escroweye.token"));
-  const [user, setUser] = useState<ApiUser | null>(() => {
-    const stored = localStorage.getItem("escroweye.user");
-    return stored ? (JSON.parse(stored) as ApiUser) : null;
-  });
+  const [user, setUser] = useState<ApiUser | null>(() => readStored<ApiUser>("escroweye.user"));
+  const [profile, setProfile] = useState<Profile>(() => readStored<Profile>("escroweye.profile") ?? defaultProfile);
   const [homes, setHomes] = useState<Home[]>([]);
   const [jobs, setJobs] = useState<JobSummary[]>([]);
+  const [supplierOffers, setSupplierOffers] = useState<JobSummary[]>([]);
+  const [supplierActive, setSupplierActive] = useState<JobSummary[]>([]);
+  const [supplierArchived, setSupplierArchived] = useState<JobSummary[]>([]);
+  const [categories, setCategories] = useState<ServiceCategory[]>([]);
+  const [workerResults, setWorkerResults] = useState<WorkerProfile[]>(workers);
   const [selectedJobId, setSelectedJobId] = useState<number | null>(null);
-  const [selectedJob, setSelectedJob] = useState<JobDetail | null>(null);
-  const [bids, setBids] = useState<Bid[]>([]);
-  const [photos, setPhotos] = useState<Photo[]>([]);
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
+  const [workspace, setWorkspace] = useState<WorkspaceData>(emptyWorkspace);
+  const [ownerView, setOwnerView] = useState<OwnerView>("browse");
+  const [supplierView, setSupplierView] = useState<SupplierView>("jobs");
+  const [jobTab, setJobTab] = useState<JobTab>("offers");
+  const [activeWorker, setActiveWorker] = useState(workers[0]);
+  const [requestStep, setRequestStep] = useState<RequestStep | null>(null);
+  const [quoteState, setQuoteState] = useState<QuoteState>(null);
+  const [pendingPayment, setPendingPayment] = useState<PendingServicePayment | null>(null);
+  const [notice, setNotice] = useState("Choose a role to start.");
   const [loading, setLoading] = useState(false);
-  const [notice, setNotice] = useState("Connect a mock wallet to start.");
-  const [pendingPayment, setPendingPayment] = useState<PendingJobPayment | null>(null);
-  const api = useApi(token);
 
-  const persistSession = (nextToken: string, nextUser: ApiUser) => {
+  const api = useCallback(<T,>(path: string, options?: RequestInit) => apiRequest<T>(token, path, options), [token]);
+  const displayName = [profile.firstName, profile.lastName].filter(Boolean).join(" ") || (user?.user_type === "supplier" ? "Supplier" : "Owner");
+  const ownerJobs = useMemo(() => jobs.filter((job) => user && job.owner.id === user.id), [jobs, user]);
+  const assignedJobs = useMemo(() => jobs.filter((job) => user && job.supplier?.id === user.id), [jobs, user]);
+  const marketJobs = useMemo(
+    () => supplierOffers.length ? supplierOffers : jobs.filter((job) => job.status === "bidding" || job.status === "quote_requested" || job.status === "quote_received"),
+    [jobs, supplierOffers],
+  );
+  const activeSupplierJobs = useMemo(() => supplierActive.length ? supplierActive : assignedJobs.filter((job) => job.status !== "completed" && job.status !== "disputed"), [assignedJobs, supplierActive]);
+  const archivedSupplierJobs = useMemo(() => supplierArchived.length ? supplierArchived : assignedJobs.filter((job) => job.status === "completed" || job.status === "disputed"), [assignedJobs, supplierArchived]);
+
+  const persistSession = (nextToken: string, nextUser: ApiUser, nextProfile: Profile) => {
     localStorage.setItem("escroweye.token", nextToken);
     localStorage.setItem("escroweye.user", JSON.stringify(nextUser));
+    localStorage.setItem("escroweye.profile", JSON.stringify(nextProfile));
     setToken(nextToken);
     setUser(nextUser);
+    setProfile(nextProfile);
   };
 
   const clearSession = () => {
@@ -198,8 +203,8 @@ function App() {
     setUser(null);
     setHomes([]);
     setJobs([]);
+    setWorkspace(emptyWorkspace);
     setSelectedJobId(null);
-    setSelectedJob(null);
     setNotice("Signed out.");
   };
 
@@ -211,26 +216,53 @@ function App() {
 
   const loadJobs = useCallback(async () => {
     if (!token) return;
-    const result = await api<{ jobs: JobSummary[] } | JobSummary[]>("/api/jobs");
-    const nextJobs = asArray<JobSummary>(result, "jobs");
+    if (user?.user_type === "supplier") {
+      const [offers, active, archived] = await Promise.all([
+        api<{ jobs: JobSummary[] }>("/api/supplier/jobs/offers"),
+        api<{ jobs: JobSummary[] }>("/api/supplier/jobs/active"),
+        api<{ jobs: JobSummary[] }>("/api/supplier/jobs/archived"),
+      ]);
+      setSupplierOffers(offers.jobs);
+      setSupplierActive(active.jobs);
+      setSupplierArchived(archived.jobs);
+      const nextJobs = [...active.jobs, ...offers.jobs, ...archived.jobs];
+      setJobs(nextJobs);
+      setSelectedJobId((current) => current ?? nextJobs[0]?.id ?? null);
+      return;
+    }
+    const result = await api<{ requests: JobSummary[] } | JobSummary[]>("/api/service-requests");
+    const nextJobs = asArray<JobSummary>(result, "requests");
     setJobs(nextJobs);
     setSelectedJobId((current) => current ?? nextJobs[0]?.id ?? null);
-  }, [api, token]);
+  }, [api, token, user?.user_type]);
+
+  const loadMarketplace = useCallback(async () => {
+    const [categoryResult, workerResult] = await Promise.all([
+      api<{ categories: ServiceCategory[] }>("/api/service-categories"),
+      api<{ workers: WorkerResult[] }>("/api/workers"),
+    ]);
+    setCategories(categoryResult.categories);
+    const nextWorkers = workerResult.workers.map(workerFromApi);
+    setWorkerResults(nextWorkers);
+    setActiveWorker((current) => nextWorkers.find((worker) => worker.id === current.id) ?? nextWorkers[0] ?? current);
+  }, [api]);
 
   const loadJobWorkspace = useCallback(
     async (jobId: number) => {
       const [job, bidResult, photoResult, messageResult, auditResult] = await Promise.all([
-        api<JobDetail>(`/api/jobs/${jobId}`),
-        api<{ bids: Bid[] } | Bid[]>(`/api/jobs/${jobId}/bids`).catch(() => ({ bids: [] })),
-        api<{ photos: Photo[] } | Photo[]>(`/api/jobs/${jobId}/photos`).catch(() => ({ photos: [] })),
-        api<{ messages: Message[] } | Message[]>(`/api/jobs/${jobId}/messages`).catch(() => ({ messages: [] })),
-        api<{ events: AuditEvent[] } | AuditEvent[]>(`/api/jobs/${jobId}/audit-events`).catch(() => ({ events: [] })),
+        api<JobDetail>(`/api/service-requests/${jobId}`),
+        api<{ quotes: Bid[] } | Bid[]>(`/api/service-requests/${jobId}/quotes`).catch(() => ({ quotes: [] })),
+        api<{ proof: Photo[] } | Photo[]>(`/api/service-requests/${jobId}/proof`).catch(() => ({ proof: [] })),
+        api<{ messages: Message[] } | Message[]>(`/api/service-requests/${jobId}/messages`).catch(() => ({ messages: [] })),
+        api<{ events: AuditEvent[] } | AuditEvent[]>(`/api/service-requests/${jobId}/audit-events`).catch(() => ({ events: [] })),
       ]);
-      setSelectedJob(job);
-      setBids(asArray<Bid>(bidResult, "bids"));
-      setPhotos(asArray<Photo>(photoResult, "photos"));
-      setMessages(asArray<Message>(messageResult, "messages"));
-      setAuditEvents(asArray<AuditEvent>(auditResult, "events"));
+      setWorkspace({
+        job,
+        bids: asArray<Bid>(bidResult, "quotes"),
+        photos: asArray<Photo>(photoResult, "proof").map(photoFromProof),
+        messages: asArray<Message>(messageResult, "messages"),
+        auditEvents: asArray<AuditEvent>(auditResult, "events"),
+      });
     },
     [api],
   );
@@ -239,8 +271,8 @@ function App() {
     if (!token) return;
     setLoading(true);
     try {
-      await Promise.all([loadHomes(), loadJobs()]);
-      setNotice("Workspace refreshed.");
+      await Promise.all([loadHomes(), loadJobs(), loadMarketplace()]);
+      setNotice("Synced with EscrowEye API.");
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Unable to load workspace.");
     } finally {
@@ -249,27 +281,21 @@ function App() {
   }, [loadHomes, loadJobs, token]);
 
   useEffect(() => {
-    if (!token) return;
-    refreshAll();
+    if (token) refreshAll();
   }, [refreshAll, token]);
 
   useEffect(() => {
     if (!selectedJobId || !token) {
-      setSelectedJob(null);
+      setWorkspace(emptyWorkspace);
       return;
     }
-    setLoading(true);
-    loadJobWorkspace(selectedJobId)
-      .catch((error: unknown) => setNotice(error instanceof Error ? error.message : "Unable to load job."))
-      .finally(() => setLoading(false));
+    loadJobWorkspace(selectedJobId).catch((error: unknown) => setNotice(error instanceof Error ? error.message : "Unable to load job."));
   }, [loadJobWorkspace, selectedJobId, token]);
 
-  const selectedHome = useMemo(() => homes.find((home) => home.id === selectedJob?.home.id), [homes, selectedJob]);
-
-  async function handleLogin(form: LoginFormState) {
+  async function handleLogin(form: { userType: UserType; accountId: string; publicKey: string; profile: Profile }) {
     setLoading(true);
     try {
-      const challenge = await api<{ nonce: string; message: string }>("/api/auth/challenge", {
+      const challenge = await api<{ nonce: string }>("/api/auth/challenge", {
         method: "POST",
         body: JSON.stringify({ hedera_account_id: form.accountId }),
       });
@@ -283,8 +309,8 @@ function App() {
           user_type: form.userType,
         }),
       });
-      persistSession(login.token, login.user);
-      setNotice(`Signed in as ${login.user.user_type} ${login.user.hedera_account_id}.`);
+      persistSession(login.token, login.user, form.profile);
+      setNotice(`Connected ${login.user.user_type} profile ${form.accountId}.`);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Login failed.");
     } finally {
@@ -292,35 +318,24 @@ function App() {
     }
   }
 
-  async function handleCreateHome(payload: { name: string; address: string }) {
-    await api<Home>("/api/homes", { method: "POST", body: JSON.stringify(payload) });
-    setNotice("Home created.");
-    await loadHomes();
-  }
-
-  async function handleAddRoom(homeId: number, payload: { name: string; sq_meters: number }) {
-    await api<Room>(`/api/homes/${homeId}/rooms`, { method: "POST", body: JSON.stringify(payload) });
-    setNotice("Room added.");
-    await loadHomes();
-  }
-
-  async function createJob(payload: JobForm, paymentHeader?: string) {
+  async function createServiceRequest(payload: ServiceRequestPayload, paymentHeader?: string) {
     try {
-      const result = await api<{ id: number; status: JobStatus }>("/api/jobs", {
+      const result = await api<{ id: number; status: JobStatus }>("/api/service-requests", {
         method: "POST",
         headers: paymentHeader ? { "X-PAYMENT": paymentHeader } : undefined,
         body: JSON.stringify(payload),
       });
       setPendingPayment(null);
-      setNotice(`Job #${result.id} created.`);
+      setRequestStep("sent");
+      setNotice(`Request #${result.id} created with x402 payment.`);
       await loadJobs();
       setSelectedJobId(result.id);
     } catch (error) {
-      if (error instanceof ApiError && error.status === 402 && typeof error.body === "object" && error.body) {
+      if (error instanceof ApiError && error.status === 402 && error.body && typeof error.body === "object") {
         const requirements = (error.body as { payment_requirements?: PaymentRequirements }).payment_requirements;
         if (requirements) {
           setPendingPayment({ payload, requirements });
-          setNotice("x402 payment required. Approve payment, then replay the job request.");
+          setNotice("x402 payment required. Replay the paid request to create this service request.");
           return;
         }
       }
@@ -328,9 +343,27 @@ function App() {
     }
   }
 
-  async function replayJobPayment(paymentHeader: string) {
-    if (!pendingPayment) return;
-    await createJob(pendingPayment.payload, paymentHeader || "mock-paid-x402-header");
+  async function ensureHomeForRequest() {
+    if (homes[0]) return homes[0];
+    const home = await api<Home>("/api/homes", {
+      method: "POST",
+      body: JSON.stringify({ name: "Primary property", address: profile.location || "Ikoyi, Lagos" }),
+    });
+    await loadHomes();
+    return home;
+  }
+
+  async function submitOwnerRequest(request: RequestDraft) {
+    await ensureHomeForRequest();
+    await createServiceRequest({
+      title: request.title,
+      description: request.description,
+      address: profile.location || "Ikoyi, Lagos",
+      location_description: request.notes,
+      schedule: request.schedule,
+      budget_amount: hbarToTinybar(request.budgetHbar),
+      category: "cleaning",
+    });
   }
 
   async function mutateJob(action: () => Promise<unknown>, success: string) {
@@ -347,501 +380,711 @@ function App() {
     }
   }
 
+  async function seedDemo() {
+    setLoading(true);
+    try {
+      const seeded = await api<{ job_id: number }>("/api/demo/seed", { method: "POST" });
+      await refreshAll();
+      setSelectedJobId(seeded.job_id);
+      setNotice(`Demo seeded with job #${seeded.job_id}.`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Unable to seed demo.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
   if (!user || !token) {
-    return <LoginScreen loading={loading} notice={notice} onLogin={handleLogin} />;
+    return <Onboarding loading={loading} notice={notice} profile={profile} onLogin={handleLogin} />;
   }
 
   return (
-    <div className="app-shell">
-      <header className="topbar">
-        <div>
-          <p className="eyebrow">EscrowEye</p>
-          <h1>Property cleaning escrow</h1>
-        </div>
-        <div className="session">
-          <span className={`role role-${user.user_type}`}>{user.user_type}</span>
-          <span>{user.hedera_account_id}</span>
-          <button className="ghost-button" onClick={refreshAll} disabled={loading}>
-            Refresh
-          </button>
-          <button className="ghost-button" onClick={clearSession}>
-            Sign out
-          </button>
-        </div>
-      </header>
-
-      <main className="workspace">
-        <aside className="sidebar">
-          <Notice text={notice} loading={loading} />
-          <HomesPanel homes={homes} onCreateHome={handleCreateHome} onAddRoom={handleAddRoom} />
-          <JobCreatePanel homes={homes} pendingPayment={pendingPayment} onCreateJob={createJob} onReplayPayment={replayJobPayment} />
-        </aside>
-
-        <section className="job-column">
-          <JobList jobs={jobs} selectedJobId={selectedJobId} onSelect={setSelectedJobId} />
-          {selectedJob ? (
-            <JobWorkspace
-              user={user}
-              job={selectedJob}
-              selectedHome={selectedHome}
-              bids={bids}
-              photos={photos}
-              auditEvents={auditEvents}
-              onBid={(amountTinybar, message) =>
-                mutateJob(
-                  () => api(`/api/jobs/${selectedJob.id}/bids`, { method: "POST", body: JSON.stringify({ amount_tinybar: amountTinybar, message }) }),
-                  "Bid placed.",
-                )
-              }
-              onAward={(bidId) =>
-                mutateJob(
-                  () => api(`/api/jobs/${selectedJob.id}/award`, { method: "POST", body: JSON.stringify({ bid_id: bidId }) }),
-                  "Bid awarded.",
-                )
-              }
-              onFund={(signedTransaction) =>
-                mutateJob(
-                  () =>
-                    api(`/api/jobs/${selectedJob.id}/fund`, {
-                      method: "POST",
-                      body: JSON.stringify({ signed_transaction: signedTransaction || "mock_hashpack_signed_transaction" }),
-                    }),
-                  "Escrow funded.",
-                )
-              }
-              onMarkReady={(message) =>
-                mutateJob(
-                  () => api(`/api/jobs/${selectedJob.id}/mark-ready`, { method: "POST", body: JSON.stringify({ message }) }),
-                  "Job marked ready.",
-                )
-              }
-              onConfirm={() => {
-                const body = { action: "confirm_job", job_id: selectedJob.id, timestamp: Date.now() };
-                return mutateJob(
-                  () =>
-                    api(`/api/jobs/${selectedJob.id}/confirm`, {
-                      method: "POST",
-                      body: JSON.stringify({ signature: "mock_hashpack_confirmation_signature", message: JSON.stringify(body) }),
-                    }),
-                  "Job confirmed.",
-                );
-              }}
-              onDispute={(reason) =>
-                mutateJob(
-                  () => api(`/api/jobs/${selectedJob.id}/dispute`, { method: "POST", body: JSON.stringify({ reason }) }),
-                  "Dispute opened.",
-                )
-              }
-            />
-          ) : (
-            <EmptyState title="No job selected" body="Create a job or select one from the list." />
-          )}
-        </section>
-
-        <ConversationPanel
-          job={selectedJob}
-          messages={messages}
-          photos={photos}
-          rooms={selectedHome?.rooms ?? []}
-          onSend={(body, photoIds) =>
-            selectedJob
-              ? mutateJob(
-                  () => api(`/api/jobs/${selectedJob.id}/messages`, { method: "POST", body: JSON.stringify({ body, photo_ids: photoIds }) }),
-                  "Message sent.",
-                )
-              : Promise.resolve()
-          }
-          onUpload={(files, roomId) =>
-            selectedJob
-              ? mutateJob(async () => {
-                  const form = new FormData();
-                  files.forEach((file) => form.append("photos", file));
-                  if (roomId) form.append("room_id", String(roomId));
-                  form.append("encrypted_keys", JSON.stringify({ mode: "mvp_mock", count: files.length }));
-                  await api(`/api/jobs/${selectedJob.id}/photos`, { method: "POST", body: form });
-                }, "Photos uploaded.")
-              : Promise.resolve()
-          }
-        />
-      </main>
-    </div>
-  );
-}
-
-type LoginFormState = { userType: UserType; accountId: string; publicKey: string };
-
-function LoginScreen({ loading, notice, onLogin }: { loading: boolean; notice: string; onLogin: (form: LoginFormState) => Promise<void> }) {
-  const [form, setForm] = useState<LoginFormState>({
-    userType: "owner",
-    accountId: "0.0.12345",
-    publicKey: "302a300506032b6570032100mock",
-  });
-
-  return (
-    <main className="login-screen">
-      <section className="login-card">
-        <div>
-          <p className="eyebrow">EscrowEye MVP</p>
-          <h1>Sign in with a mock HashPack persona</h1>
-          <p className="muted">Uses the documented challenge and login endpoints with deterministic mock signatures.</p>
-        </div>
-        <form
-          className="stack"
-          onSubmit={(event) => {
-            event.preventDefault();
-            onLogin(form);
-          }}
-        >
-          <Segmented
-            value={form.userType}
-            options={[
-              ["owner", "Owner"],
-              ["supplier", "Supplier"],
-            ]}
-            onChange={(value) => setForm((current) => ({ ...current, userType: value as UserType }))}
+    <main className="desktop-app">
+      <Sidebar
+        user={user}
+        profile={profile}
+        displayName={displayName}
+        activeView={user.user_type === "owner" ? ownerView : supplierView}
+        setOwnerView={setOwnerView}
+        setSupplierView={setSupplierView}
+        onRefresh={refreshAll}
+        onSeedDemo={seedDemo}
+        onSignOut={clearSession}
+        loading={loading}
+      />
+      <section className="desktop-main">
+        <Topbar displayName={displayName} profile={profile} notice={notice} />
+        {user.user_type === "owner" ? (
+          <OwnerDesktop
+            view={ownerView}
+            profile={profile}
+            jobs={ownerJobs}
+            categories={categories}
+            workers={workerResults}
+            activeWorker={activeWorker}
+            setActiveWorker={setActiveWorker}
+            selectedJob={workspace.job}
+            photos={workspace.photos}
+            auditEvents={workspace.auditEvents}
+            requestStep={requestStep}
+            setRequestStep={setRequestStep}
+            pendingPayment={pendingPayment}
+            onSubmitRequest={submitOwnerRequest}
+            onReplayPayment={(paymentHeader) => pendingPayment && createServiceRequest(pendingPayment.payload, paymentHeader || "mock-paid-x402-header")}
+            onSelectJob={setSelectedJobId}
+            onConfirm={() => {
+              if (!workspace.job) return Promise.resolve();
+              const body = { action: "confirm_job", job_id: workspace.job.id, timestamp: Date.now() };
+              return mutateJob(
+                () => api(`/api/service-requests/${workspace.job!.id}/confirm-satisfaction`, { method: "POST", body: JSON.stringify({ signature: "mock_hashpack_confirmation_signature", message: JSON.stringify(body) }) }),
+                "Owner satisfaction confirmed. Payment release event recorded.",
+              );
+            }}
+            onDispute={(reason) =>
+              workspace.job
+                ? mutateJob(() => api(`/api/service-requests/${workspace.job!.id}/dispute`, { method: "POST", body: JSON.stringify({ reason }) }), "Dispute opened for EscrowEye review.")
+                : Promise.resolve()
+            }
           />
-          <label>
-            Hedera account
-            <input value={form.accountId} onChange={(event) => setForm((current) => ({ ...current, accountId: event.target.value }))} />
-          </label>
-          <label>
-            Public key
-            <input value={form.publicKey} onChange={(event) => setForm((current) => ({ ...current, publicKey: event.target.value }))} />
-          </label>
-          <button className="primary-button" disabled={loading}>
-            Connect persona
-          </button>
-        </form>
-        <Notice text={notice} loading={loading} />
+        ) : (
+          <SupplierDesktop
+            view={supplierView}
+            jobTab={jobTab}
+            setJobTab={setJobTab}
+            profile={profile}
+            marketJobs={marketJobs}
+            activeJobs={activeSupplierJobs}
+            archivedJobs={archivedSupplierJobs}
+            selectedJob={workspace.job}
+            bids={workspace.bids}
+            photos={workspace.photos}
+            messages={workspace.messages}
+            auditEvents={workspace.auditEvents}
+            quoteState={quoteState}
+            setQuoteState={setQuoteState}
+            onSelectJob={setSelectedJobId}
+            onSendQuote={(job, amount) =>
+              mutateJob(
+                () => api(`/api/service-requests/${job.id}/quotes`, { method: "POST", body: JSON.stringify({ amount: hbarToTinybar(amount), message: "Quote submitted from supplier desktop flow.", scope: "Service request scope", timeline: "1 day" }) }),
+                "Quote sent.",
+              )
+            }
+            onMarkReady={(message) =>
+              workspace.job
+                ? mutateJob(() => api(`/api/supplier/jobs/${workspace.job!.id}/mark-complete`, { method: "POST", body: JSON.stringify({ message }) }), "Job marked ready for owner confirmation.")
+                : Promise.resolve()
+            }
+            onUpload={(files, roomId) =>
+              workspace.job
+                ? mutateJob(async () => {
+                    const form = new FormData();
+                    files.forEach((file) => form.append("photos", file));
+                    if (roomId) form.append("room_id", String(roomId));
+                    form.append("encrypted_keys", JSON.stringify({ mode: "mvp_mock", count: files.length }));
+                    await api(`/api/service-requests/${workspace.job!.id}/proof`, { method: "POST", body: form });
+                  }, "Proof uploaded for AI validation.")
+                : Promise.resolve()
+            }
+          />
+        )}
       </section>
     </main>
   );
 }
 
-function Notice({ text, loading }: { text: string; loading?: boolean }) {
-  return <div className="notice">{loading ? "Working..." : text}</div>;
+function readStored<T>(key: string): T | null {
+  const stored = localStorage.getItem(key);
+  return stored ? (JSON.parse(stored) as T) : null;
 }
 
-function Segmented({ value, options, onChange }: { value: string; options: [string, string][]; onChange: (value: string) => void }) {
+function Onboarding({ loading, notice, profile, onLogin }: { loading: boolean; notice: string; profile: Profile; onLogin: (form: { userType: UserType; accountId: string; publicKey: string; profile: Profile }) => Promise<void> }) {
+  const [userType, setUserType] = useState<UserType>("owner");
+  const [accountId, setAccountId] = useState("0.0.12345");
+  const [publicKey, setPublicKey] = useState("302a300506032b6570032100mock");
+  const [draft, setDraft] = useState<Profile>({ ...profile, firstName: profile.firstName || "Nkosi", lastName: profile.lastName || "Khumalo" });
+
   return (
-    <div className="segmented">
-      {options.map(([optionValue, label]) => (
-        <button key={optionValue} type="button" className={value === optionValue ? "active" : ""} onClick={() => onChange(optionValue)}>
-          {label}
-        </button>
-      ))}
+    <main className="onboarding-desktop">
+      <section className="onboarding-hero">
+        <p className="eyebrow light">EscrowEye</p>
+        <h1>Hire local service suppliers with escrow, proof, and AI validation.</h1>
+        <p>Owners request quotes and fund jobs. Suppliers upload proof and get paid after EscrowEye verifies the work.</p>
+      </section>
+      <form
+        className="onboarding-form"
+        onSubmit={(event) => {
+          event.preventDefault();
+          onLogin({ userType, accountId, publicKey, profile: draft });
+        }}
+      >
+        <div>
+          <p className="eyebrow">Get started</p>
+          <h2>Create profile</h2>
+        </div>
+        <div className="role-grid">
+          <button type="button" className={userType === "owner" ? "role-card active" : "role-card"} onClick={() => setUserType("owner")}>
+            <strong>Find and hire a service</strong>
+            <span>Owner</span>
+          </button>
+          <button type="button" className={userType === "supplier" ? "role-card active" : "role-card"} onClick={() => setUserType("supplier")}>
+            <strong>Earn money by providing services</strong>
+            <span>Supplier</span>
+          </button>
+        </div>
+        <div className="form-grid two">
+          <label>First name<input value={draft.firstName} onChange={(event) => setDraft((current) => ({ ...current, firstName: event.target.value }))} /></label>
+          <label>Last name<input value={draft.lastName} onChange={(event) => setDraft((current) => ({ ...current, lastName: event.target.value }))} /></label>
+        </div>
+        <div className="form-grid two">
+          <label>Location<input value={draft.location} onChange={(event) => setDraft((current) => ({ ...current, location: event.target.value }))} /></label>
+          <label>Service area<input value={draft.serviceArea} onChange={(event) => setDraft((current) => ({ ...current, serviceArea: event.target.value }))} /></label>
+        </div>
+        <div className="form-grid two">
+          <label>Hedera account<input value={accountId} onChange={(event) => setAccountId(event.target.value)} /></label>
+          <label>Payment preference<select value={draft.paymentToken} onChange={(event) => setDraft((current) => ({ ...current, paymentToken: event.target.value as Profile["paymentToken"] }))}><option>HBAR</option><option>Hedera token</option></select></label>
+        </div>
+        <label>Public key<input value={publicKey} onChange={(event) => setPublicKey(event.target.value)} /></label>
+        <button className="primary-button" disabled={loading}>Create desktop workspace</button>
+        <Notice text={notice} loading={loading} />
+      </form>
+    </main>
+  );
+}
+
+function Sidebar({ user, profile, displayName, activeView, setOwnerView, setSupplierView, onRefresh, onSeedDemo, onSignOut, loading }: { user: ApiUser; profile: Profile; displayName: string; activeView: string; setOwnerView: (view: OwnerView) => void; setSupplierView: (view: SupplierView) => void; onRefresh: () => void; onSeedDemo: () => void; onSignOut: () => void; loading: boolean }) {
+  const items = user.user_type === "owner"
+    ? [["browse", "Browse Services"], ["requests", "My Requests"], ["messages", "Messages"], ["profile", "Profile"]]
+    : [["jobs", "Jobs"], ["earnings", "Earnings"], ["messages", "Messages"], ["profile", "Profile"]];
+
+  return (
+    <aside className="sidebar">
+      <div className="brand-block">
+        <span>EE</span>
+        <div>
+          <strong>EscrowEye</strong>
+          <small>Hedera escrow</small>
+        </div>
+      </div>
+      <div className="profile-mini">
+        <img src={profile.photoUrl} alt="" />
+        <span>
+          <strong>{displayName}</strong>
+          <small>{user.user_type} · {user.hedera_account_id}</small>
+        </span>
+      </div>
+      <nav className="side-nav">
+        {items.map(([value, label]) => (
+          <button
+            key={value}
+            className={activeView === value ? "active" : ""}
+            onClick={() => user.user_type === "owner" ? setOwnerView(value as OwnerView) : setSupplierView(value as SupplierView)}
+          >
+            {label}
+          </button>
+        ))}
+      </nav>
+      <div className="sidebar-actions">
+        <button className="outline-button" onClick={onRefresh} disabled={loading}>Refresh</button>
+        <button className="outline-button" onClick={onSeedDemo} disabled={loading}>Seed demo</button>
+        <button className="ghost-button" onClick={onSignOut}>Sign out</button>
+      </div>
+    </aside>
+  );
+}
+
+function Topbar({ displayName, profile, notice }: { displayName: string; profile: Profile; notice: string }) {
+  return (
+    <header className="topbar">
+      <div>
+        <p className="eyebrow">Desktop workspace</p>
+        <h1>Welcome, {displayName.split(" ")[0]}</h1>
+      </div>
+      <div className="topbar-right">
+        <Notice text={notice} />
+        <span className="token-pill">{profile.paymentToken}</span>
+      </div>
+    </header>
+  );
+}
+
+function OwnerDesktop({
+  view,
+  profile,
+  jobs,
+  categories,
+  workers,
+  activeWorker,
+  setActiveWorker,
+  selectedJob,
+  photos,
+  auditEvents,
+  requestStep,
+  setRequestStep,
+  pendingPayment,
+  onSubmitRequest,
+  onReplayPayment,
+  onSelectJob,
+  onConfirm,
+  onDispute,
+}: {
+  view: OwnerView;
+  profile: Profile;
+  jobs: JobSummary[];
+  categories: ServiceCategory[];
+  workers: WorkerProfile[];
+  activeWorker: WorkerProfile;
+  setActiveWorker: (worker: WorkerProfile) => void;
+  selectedJob: JobDetail | null;
+  photos: Photo[];
+  auditEvents: AuditEvent[];
+  requestStep: RequestStep | null;
+  setRequestStep: (step: RequestStep | null) => void;
+  pendingPayment: PendingServicePayment | null;
+  onSubmitRequest: (request: RequestDraft) => Promise<void>;
+  onReplayPayment: (paymentHeader: string) => Promise<void> | null;
+  onSelectJob: (id: number) => void;
+  onConfirm: () => Promise<void>;
+  onDispute: (reason: string) => Promise<void>;
+}) {
+  if (view === "messages") return <MessagesPanel messages={selectedJob ? [`Quote and escrow updates for ${selectedJob.title}`, "EscrowEye AI validation messages appear here."] : ["No active request selected."]} />;
+  if (view === "profile") return <ProfilePanel profile={profile} role="Owner" />;
+  if (view === "requests") return <OwnerRequests jobs={jobs} selectedJob={selectedJob} photos={photos} auditEvents={auditEvents} onSelectJob={onSelectJob} onConfirm={onConfirm} onDispute={onDispute} />;
+
+  return (
+    <section className="owner-grid">
+      <div className="main-column">
+        <HeroPanel
+          title="Browse trusted suppliers"
+          body="Find cleaning, maintenance, pool care, Airbnb turnover, carpentry, and repair professionals in your region."
+          action="Request quote"
+          onAction={() => setRequestStep("need")}
+        />
+        <CategoryPanel categories={categories} />
+        <WorkerDirectory workers={workers} activeWorker={activeWorker} setActiveWorker={setActiveWorker} onRequest={() => setRequestStep("need")} />
+      </div>
+      <aside className="context-column">
+        <WorkerProfileCard worker={activeWorker} onRequest={() => setRequestStep("need")} />
+        <EscrowFlowCard />
+      </aside>
+      {requestStep ? <RequestQuoteModal worker={activeWorker} step={requestStep} setStep={setRequestStep} pendingPayment={pendingPayment} onSubmitRequest={onSubmitRequest} onReplayPayment={onReplayPayment} /> : null}
+    </section>
+  );
+}
+
+function SupplierDesktop({
+  view,
+  jobTab,
+  setJobTab,
+  profile,
+  marketJobs,
+  activeJobs,
+  archivedJobs,
+  selectedJob,
+  bids,
+  photos,
+  messages,
+  auditEvents,
+  quoteState,
+  setQuoteState,
+  onSelectJob,
+  onSendQuote,
+  onMarkReady,
+  onUpload,
+}: {
+  view: SupplierView;
+  jobTab: JobTab;
+  setJobTab: (tab: JobTab) => void;
+  profile: Profile;
+  marketJobs: JobSummary[];
+  activeJobs: JobSummary[];
+  archivedJobs: JobSummary[];
+  selectedJob: JobDetail | null;
+  bids: Bid[];
+  photos: Photo[];
+  messages: Message[];
+  auditEvents: AuditEvent[];
+  quoteState: QuoteState;
+  setQuoteState: (state: QuoteState) => void;
+  onSelectJob: (id: number) => void;
+  onSendQuote: (job: JobSummary, amount: string) => Promise<void>;
+  onMarkReady: (message: string) => Promise<void>;
+  onUpload: (files: File[], roomId?: number) => Promise<void>;
+}) {
+  if (view === "messages") return <MessagesPanel messages={messages.length ? messages.map((message) => message.body) : ["Quote cards, proof updates, and owner confirmation prompts appear here."]} />;
+  if (view === "profile") return <ProfilePanel profile={profile} role="Supplier" />;
+  if (view === "earnings") return <EarningsPanel activeJobs={activeJobs} archivedJobs={archivedJobs} />;
+
+  return (
+    <section className="supplier-grid">
+      <div className="main-column">
+        <SupplierStats activeJobs={activeJobs} archivedJobs={archivedJobs} />
+        <JobBoard
+          jobTab={jobTab}
+          setJobTab={setJobTab}
+          marketJobs={marketJobs}
+          activeJobs={activeJobs}
+          archivedJobs={archivedJobs}
+          onSelectJob={onSelectJob}
+          setQuoteState={setQuoteState}
+        />
+      </div>
+      <aside className="context-column">
+        {selectedJob ? <SupplierJobDetail job={selectedJob} bids={bids} photos={photos} auditEvents={auditEvents} onQuote={() => setQuoteState({ job: selectedJob, amount: "220000" })} onMarkReady={onMarkReady} onUpload={onUpload} /> : <EmptyPanel title="Select a job" body="Choose an offer or active job to send quotes, upload proof, and trigger AI validation." />}
+      </aside>
+      {quoteState ? <SendQuoteModal state={quoteState} setState={setQuoteState} onSendQuote={onSendQuote} /> : null}
+    </section>
+  );
+}
+
+function HeroPanel({ title, body, action, onAction }: { title: string; body: string; action: string; onAction: () => void }) {
+  return (
+    <section className="hero-panel">
+      <div>
+        <p className="eyebrow light">EscrowEye marketplace</p>
+        <h2>{title}</h2>
+        <p>{body}</p>
+      </div>
+      <button className="primary-button" onClick={onAction}>{action}</button>
+    </section>
+  );
+}
+
+function CategoryPanel({ categories }: { categories: ServiceCategory[] }) {
+  const visibleCategories = categories.length ? categories.map((category) => category.name) : serviceCategories;
+  return (
+    <section className="panel">
+      <PanelHead title="Browse services" count={visibleCategories.length} />
+      <div className="category-grid">
+        {visibleCategories.map((category) => <button key={category}><span />{category}</button>)}
+      </div>
+    </section>
+  );
+}
+
+function WorkerDirectory({ workers, activeWorker, setActiveWorker, onRequest }: { workers: WorkerProfile[]; activeWorker: WorkerProfile; setActiveWorker: (worker: WorkerProfile) => void; onRequest: () => void }) {
+  return (
+    <section className="panel">
+      <PanelHead title="Workers in selected region" count={workers.length} />
+      <div className="worker-table">
+        {workers.map((worker) => (
+          <button key={worker.id} className={activeWorker.id === worker.id ? "worker-row active" : "worker-row"} onClick={() => setActiveWorker(worker)}>
+            <img src={worker.image} alt="" />
+            <span><strong>{worker.name}</strong><small>{worker.profession} · {worker.location}</small></span>
+            <b>{worker.rating}</b>
+            <small>{worker.rate}</small>
+            <em onClick={(event) => { event.stopPropagation(); onRequest(); }}>Request quote</em>
+          </button>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function WorkerProfileCard({ worker, onRequest }: { worker: WorkerProfile; onRequest: () => void }) {
+  return (
+    <section className="panel worker-profile-card">
+      <img src={worker.image} alt="" />
+      <h2>{worker.name}</h2>
+      <p>{worker.profession}</p>
+      <div className="mini-stats">
+        <Metric label="Rating" value={worker.rating} />
+        <Metric label="Jobs" value={String(worker.jobs)} />
+        <Metric label="Avg rate" value={worker.rate} />
+      </div>
+      <p className="muted">Verified supplier with portfolio proof, reviews, and escrow-safe payment flow.</p>
+      <button className="primary-button" onClick={onRequest}>Request quote</button>
+    </section>
+  );
+}
+
+function OwnerRequests({ jobs, selectedJob, photos, auditEvents, onSelectJob, onConfirm, onDispute }: { jobs: JobSummary[]; selectedJob: JobDetail | null; photos: Photo[]; auditEvents: AuditEvent[]; onSelectJob: (id: number) => void; onConfirm: () => Promise<void>; onDispute: (reason: string) => Promise<void> }) {
+  const [reason, setReason] = useState("Uploaded proof needs more evidence.");
+  return (
+    <section className="split-grid">
+      <div className="panel">
+        <PanelHead title="My service requests" count={jobs.length || sampleJobs.length} />
+        <div className="job-list">
+          {jobs.map((job) => <JobRow key={job.id} job={job} onClick={() => onSelectJob(job.id)} />)}
+          {!jobs.length ? sampleJobs.map((job) => <StaticJobRow key={job.title} job={job} tag="Quote requested" />) : null}
+        </div>
+      </div>
+      <div className="panel">
+        {selectedJob ? (
+          <div className="detail-stack">
+            <PanelHead title="Owner job detail" />
+            <h2>{selectedJob.title}</h2>
+            <Fact label="Supplier" value={selectedJob.supplier?.hedera_account_id ?? "Waiting for quote"} />
+            <Fact label="Budget" value={`${tinybarToHbar(selectedJob.suggested_price_tinybar)} HBAR`} />
+            <Fact label="Base commitment fee" value={`${tinybarToHbar(selectedJob.suggested_price_tinybar * 0.2)} HBAR`} />
+            <Fact label="Escrow" value={selectedJob.escrow_account_id ?? "Escrow pending"} />
+            <AiValidation photos={photos} auditEvents={auditEvents} />
+            <button className="primary-button" onClick={onConfirm}>Confirm satisfaction</button>
+            <textarea value={reason} onChange={(event) => setReason(event.target.value)} />
+            <button className="outline-button" onClick={() => onDispute(reason)}>Open dispute</button>
+          </div>
+        ) : <EmptyPanel title="No request selected" body="Select a request to see quotes, proof, escrow, and AI validation." />}
+      </div>
+    </section>
+  );
+}
+
+function RequestQuoteModal({ worker, step, setStep, pendingPayment, onSubmitRequest, onReplayPayment }: { worker: WorkerProfile; step: RequestStep; setStep: (step: RequestStep | null) => void; pendingPayment: PendingServicePayment | null; onSubmitRequest: (request: RequestDraft) => Promise<void>; onReplayPayment: (paymentHeader: string) => Promise<void> | null }) {
+  const [request, setRequest] = useState<RequestDraft>({
+    title: `${worker.profession} for 2 newly built two-storey buildings`,
+    description: "Clean all windows and upload proof images for EscrowEye validation.",
+    schedule: "Sat, 1 Mar 2025 · 9:00AM",
+    budgetHbar: "2",
+    notes: "Provide more information",
+  });
+  const [paymentHeader, setPaymentHeader] = useState("mock-paid-x402-header");
+
+  return (
+    <div className="modal-backdrop">
+      <section className="desktop-modal">
+        <button className="close-button" onClick={() => setStep(null)}>×</button>
+        {step === "need" ? (
+          <FlowStep title="What do you need help with?" hint="Describe the task for the supplier.">
+            <textarea value={request.description} onChange={(event) => setRequest((current) => ({ ...current, description: event.target.value }))} />
+            <button className="primary-button" onClick={() => setStep("schedule")}>Continue</button>
+          </FlowStep>
+        ) : null}
+        {step === "schedule" ? (
+          <FlowStep title="When do you need this?" hint="Choose a preferred time.">
+            <div className="schedule-grid">{["9:00AM", "12:00PM", "3:00PM", "6:00PM"].map((time) => <button key={time} onClick={() => setRequest((current) => ({ ...current, schedule: `Sat, 1 Mar 2025 · ${time}` }))}>{time}</button>)}</div>
+            <button className="primary-button" onClick={() => setStep("budget")}>Next</button>
+          </FlowStep>
+        ) : null}
+        {step === "budget" ? (
+          <FlowStep title="What is your budget?" hint="Set an expected HBAR budget.">
+            <input value={request.budgetHbar} onChange={(event) => setRequest((current) => ({ ...current, budgetHbar: event.target.value }))} />
+            <small className="info-strip">Base commitment fee is calculated as 20% after quote acceptance.</small>
+            <button className="primary-button" onClick={() => setStep("summary")}>Next</button>
+          </FlowStep>
+        ) : null}
+        {step === "summary" ? (
+          <FlowStep title="Request summary" hint={request.title}>
+            <Fact label="Supplier" value={worker.name} />
+            <Fact label="Schedule" value={request.schedule} />
+            <Fact label="Budget" value={`${request.budgetHbar} HBAR`} />
+            <textarea value={request.notes} onChange={(event) => setRequest((current) => ({ ...current, notes: event.target.value }))} />
+            <button className="primary-button" onClick={() => onSubmitRequest(request)}>Request quote</button>
+            {pendingPayment ? (
+              <div className="payment-box">
+                <small>402 Payment Required: {pendingPayment.requirements.amount} tinybar</small>
+                <input value={paymentHeader} onChange={(event) => setPaymentHeader(event.target.value)} />
+                <button className="outline-button" onClick={() => onReplayPayment(paymentHeader)}>Replay paid request</button>
+              </div>
+            ) : null}
+          </FlowStep>
+        ) : null}
+        {step === "sent" ? <SuccessPanel title="Request sent" body="Your service request was created and the audit trail is ready." /> : null}
+      </section>
     </div>
   );
 }
 
-function HomesPanel({
-  homes,
-  onCreateHome,
-  onAddRoom,
-}: {
-  homes: Home[];
-  onCreateHome: (payload: { name: string; address: string }) => Promise<void>;
-  onAddRoom: (homeId: number, payload: { name: string; sq_meters: number }) => Promise<void>;
-}) {
-  const [name, setName] = useState("Beach House");
-  const [address, setAddress] = useState("42 Ocean Drive");
-  const [roomHomeId, setRoomHomeId] = useState("");
-  const [roomName, setRoomName] = useState("Kitchen");
-  const [roomSize, setRoomSize] = useState("20");
-
-  useEffect(() => {
-    if (!roomHomeId && homes[0]) setRoomHomeId(String(homes[0].id));
-  }, [homes, roomHomeId]);
-
+function SupplierStats({ activeJobs, archivedJobs }: { activeJobs: JobSummary[]; archivedJobs: JobSummary[] }) {
   return (
-    <section className="panel">
-      <div className="panel-head">
-        <h2>Homes and rooms</h2>
-        <span>{homes.length}</span>
-      </div>
-      <form
-        className="stack"
-        onSubmit={(event) => {
-          event.preventDefault();
-          onCreateHome({ name, address });
-        }}
-      >
-        <input aria-label="Home name" value={name} onChange={(event) => setName(event.target.value)} placeholder="Home name" />
-        <input aria-label="Home address" value={address} onChange={(event) => setAddress(event.target.value)} placeholder="Address" />
-        <button className="secondary-button">Add home</button>
-      </form>
-      <form
-        className="stack"
-        onSubmit={(event) => {
-          event.preventDefault();
-          if (roomHomeId) onAddRoom(Number(roomHomeId), { name: roomName, sq_meters: Number(roomSize) });
-        }}
-      >
-        <select value={roomHomeId} onChange={(event) => setRoomHomeId(event.target.value)}>
-          {homes.map((home) => (
-            <option key={home.id} value={home.id}>
-              {home.name}
-            </option>
-          ))}
-        </select>
-        <div className="inline-grid">
-          <input value={roomName} onChange={(event) => setRoomName(event.target.value)} placeholder="Room" />
-          <input type="number" min="1" value={roomSize} onChange={(event) => setRoomSize(event.target.value)} placeholder="m2" />
-        </div>
-        <button className="secondary-button" disabled={!roomHomeId}>
-          Add room
-        </button>
-      </form>
-      <div className="list compact">
-        {homes.map((home) => (
-          <article key={home.id} className="mini-card">
-            <strong>{home.name}</strong>
-            <span>{home.address}</span>
-            <small>{home.rooms.length ? home.rooms.map((room) => room.name).join(", ") : "No rooms yet"}</small>
-          </article>
-        ))}
-      </div>
+    <section className="stat-row">
+      <Metric label="Pending earnings" value="₦570,000" />
+      <Metric label="Active jobs" value={String(activeJobs.length)} />
+      <Metric label="Paid jobs" value={String(archivedJobs.length)} />
+      <Metric label="Rating" value="4.8" />
     </section>
   );
 }
 
-function JobCreatePanel({
-  homes,
-  pendingPayment,
-  onCreateJob,
-  onReplayPayment,
-}: {
-  homes: Home[];
-  pendingPayment: PendingJobPayment | null;
-  onCreateJob: (payload: JobForm) => Promise<void>;
-  onReplayPayment: (paymentHeader: string) => Promise<void>;
-}) {
-  const [paymentHeader, setPaymentHeader] = useState("mock-paid-x402-header");
-  const [form, setForm] = useState({
-    homeId: "",
-    title: "Deep clean before guest arrival",
-    description: "Clean all listed rooms, surfaces, floors, and bathrooms.",
-    suggestedHbar: "50",
-    accessNotes: "Gate code 1234, key under mat.",
-    availableTimes: "Weekdays after 2pm",
-  });
-
-  useEffect(() => {
-    if (!form.homeId && homes[0]) setForm((current) => ({ ...current, homeId: String(homes[0].id) }));
-  }, [form.homeId, homes]);
-
-  const submit = (event: FormEvent) => {
-    event.preventDefault();
-    if (!form.homeId) return;
-    onCreateJob({
-      home_id: Number(form.homeId),
-      title: form.title,
-      description: form.description,
-      suggested_price_tinybar: hbarToTinybar(form.suggestedHbar),
-      access_notes: form.accessNotes,
-      available_times: form.availableTimes,
-    });
-  };
-
+function JobBoard({ jobTab, setJobTab, marketJobs, activeJobs, archivedJobs, onSelectJob, setQuoteState }: { jobTab: JobTab; setJobTab: (tab: JobTab) => void; marketJobs: JobSummary[]; activeJobs: JobSummary[]; archivedJobs: JobSummary[]; onSelectJob: (id: number) => void; setQuoteState: (state: QuoteState) => void }) {
+  const visibleJobs = jobTab === "offers" ? marketJobs : jobTab === "active" ? activeJobs : archivedJobs;
   return (
     <section className="panel">
-      <div className="panel-head">
-        <h2>Create job</h2>
-        <span>x402</span>
-      </div>
-      <form className="stack" onSubmit={submit}>
-        <select value={form.homeId} onChange={(event) => setForm((current) => ({ ...current, homeId: event.target.value }))}>
-          {homes.map((home) => (
-            <option key={home.id} value={home.id}>
-              {home.name}
-            </option>
-          ))}
-        </select>
-        <input value={form.title} onChange={(event) => setForm((current) => ({ ...current, title: event.target.value }))} placeholder="Job title" />
-        <textarea value={form.description} onChange={(event) => setForm((current) => ({ ...current, description: event.target.value }))} placeholder="Scope" />
-        <input value={form.suggestedHbar} onChange={(event) => setForm((current) => ({ ...current, suggestedHbar: event.target.value }))} placeholder="Suggested HBAR" />
-        <textarea value={form.accessNotes} onChange={(event) => setForm((current) => ({ ...current, accessNotes: event.target.value }))} placeholder="Access notes" />
-        <input value={form.availableTimes} onChange={(event) => setForm((current) => ({ ...current, availableTimes: event.target.value }))} placeholder="Available times" />
-        <button className="primary-button" disabled={!form.homeId}>
-          Submit job
-        </button>
-      </form>
-      {pendingPayment ? (
-        <div className="payment-box">
-          <strong>Payment required</strong>
-          <span>
-            {pendingPayment.requirements.amount} tinybar to {pendingPayment.requirements.payTo} on {pendingPayment.requirements.network}
-          </span>
-          <input value={paymentHeader} onChange={(event) => setPaymentHeader(event.target.value)} aria-label="x402 payment header" />
-          <button className="secondary-button" onClick={() => onReplayPayment(paymentHeader)}>
-            Replay paid request
-          </button>
+      <div className="tab-head">
+        <PanelHead title="Jobs" count={visibleJobs.length || sampleJobs.length} />
+        <div className="tabs">
+          {(["offers", "active", "archived"] as JobTab[]).map((tab) => <button key={tab} className={jobTab === tab ? "active" : ""} onClick={() => setJobTab(tab)}>{tab}</button>)}
         </div>
-      ) : null}
-    </section>
-  );
-}
-
-function JobList({ jobs, selectedJobId, onSelect }: { jobs: JobSummary[]; selectedJobId: number | null; onSelect: (id: number) => void }) {
-  return (
-    <section className="panel job-list-panel">
-      <div className="panel-head">
-        <h2>Jobs</h2>
-        <span>{jobs.length}</span>
       </div>
       <div className="job-list">
-        {jobs.map((job) => (
-          <button key={job.id} className={`job-row ${selectedJobId === job.id ? "selected" : ""}`} onClick={() => onSelect(job.id)}>
-            <span>
-              <strong>{job.title}</strong>
-              <small>{job.home.name}</small>
-            </span>
-            <span className={`status status-${job.status}`}>{statusLabel(job.status)}</span>
-            <span>{tinybarToHbar(job.lowest_bid_tinybar ?? job.suggested_price_tinybar)} HBAR</span>
-          </button>
-        ))}
-        {!jobs.length ? <EmptyState title="No jobs" body="Jobs will appear here after creation or backend seeding." /> : null}
+        {visibleJobs.map((job) => <JobRow key={job.id} job={job} action={jobTab === "offers" ? "Send quote" : undefined} onClick={() => { onSelectJob(job.id); if (jobTab === "offers") setQuoteState({ job, amount: "220000" }); }} />)}
+        {!visibleJobs.length ? sampleJobs.map((job) => <StaticJobRow key={job.title} job={job} tag={jobTab === "offers" ? "New offer" : jobTab === "archived" ? "Paid" : "Processing"} />) : null}
       </div>
     </section>
   );
 }
 
-function JobWorkspace({
-  user,
-  job,
-  selectedHome,
-  bids,
-  photos,
-  auditEvents,
-  onBid,
-  onAward,
-  onFund,
-  onMarkReady,
-  onConfirm,
-  onDispute,
-}: {
-  user: ApiUser;
-  job: JobDetail;
-  selectedHome?: Home;
-  bids: Bid[];
-  photos: Photo[];
-  auditEvents: AuditEvent[];
-  onBid: (amountTinybar: number, message: string) => Promise<void>;
-  onAward: (bidId: number) => Promise<void>;
-  onFund: (signedTransaction: string) => Promise<void>;
-  onMarkReady: (message: string) => Promise<void>;
-  onConfirm: () => Promise<void>;
-  onDispute: (reason: string) => Promise<void>;
-}) {
-  const [bidHbar, setBidHbar] = useState("45");
-  const [bidMessage, setBidMessage] = useState("I can complete this within the requested window.");
-  const [fundSignature, setFundSignature] = useState("mock_hashpack_signed_transaction");
-  const [readyMessage, setReadyMessage] = useState("All rooms are complete and photos are uploaded.");
-  const [disputeReason, setDisputeReason] = useState("Photos do not match the scope of work.");
-
+function SupplierJobDetail({ job, bids, photos, auditEvents, onQuote, onMarkReady, onUpload }: { job: JobDetail; bids: Bid[]; photos: Photo[]; auditEvents: AuditEvent[]; onQuote: () => void; onMarkReady: (message: string) => Promise<void>; onUpload: (files: File[], roomId?: number) => Promise<void> }) {
+  const [readyMessage, setReadyMessage] = useState("All service areas are complete and proof has been uploaded.");
+  const fileRef = useRef<HTMLInputElement | null>(null);
   return (
-    <section className="job-detail">
-      <div className="detail-header">
-        <div>
-          <p className="eyebrow">Job #{job.id}</p>
-          <h2>{job.title}</h2>
-          <p>{job.description}</p>
-        </div>
-        <span className={`status status-${job.status}`}>{statusLabel(job.status)}</span>
+    <section className="panel detail-stack">
+      <PanelHead title="Job detail" />
+      <h2>{job.title}</h2>
+      <Fact label="Requested by" value={job.owner.hedera_account_id} />
+      <Fact label="Location" value={job.home.address} />
+      <Fact label="Scheduled for" value={job.available_times ?? "Sat, 1 Mar 2025"} />
+      <Fact label="Budget" value={`${tinybarToHbar(job.suggested_price_tinybar)} HBAR`} />
+      <p className="note-box">{job.access_notes || "Upload proof after completion. EscrowEye AI validates images/videos before owner confirmation."}</p>
+      <div className="button-row">
+        <button className="primary-button" onClick={onQuote}>Send Quote</button>
+        <button className="outline-button">Private Message</button>
       </div>
-
-      <div className="metrics">
-        <Metric label="Suggested" value={`${tinybarToHbar(job.suggested_price_tinybar)} HBAR`} />
-        <Metric label="Accepted" value={job.accepted_bid ? `${tinybarToHbar(job.accepted_bid.amount_tinybar)} HBAR` : "None"} />
-        <Metric label="Escrow" value={job.escrow_account_id ?? "Not funded"} />
-        <Metric label="HCS topic" value={job.hcs_topic_id ?? "Pending"} />
+      <div className="upload-card">
+        <h3>Send job update</h3>
+        <input ref={fileRef} type="file" multiple accept="image/*,video/*" />
+        <button className="outline-button" onClick={() => onUpload(Array.from(fileRef.current?.files ?? []))}>Upload images/videos</button>
+        <textarea value={readyMessage} onChange={(event) => setReadyMessage(event.target.value)} />
+        <button className="primary-button" onClick={() => onMarkReady(readyMessage)}>Mark job complete</button>
       </div>
-
-      <div className="two-column">
-        <section className="panel">
-          <h3>Scope</h3>
-          <dl className="facts">
-            <dt>Home</dt>
-            <dd>{job.home.name}</dd>
-            <dt>Address</dt>
-            <dd>{job.home.address}</dd>
-            <dt>Access</dt>
-            <dd>{job.access_notes || "No access notes"}</dd>
-            <dt>Times</dt>
-            <dd>{job.available_times || "No availability set"}</dd>
-            <dt>Rooms</dt>
-            <dd>{selectedHome?.rooms.map((room) => `${room.name} (${room.sq_meters} m2)`).join(", ") || "Rooms unavailable"}</dd>
-          </dl>
-        </section>
-
-        <section className="panel">
-          <h3>Actions</h3>
-          {user.user_type === "supplier" ? (
-            <form
-              className="stack"
-              onSubmit={(event) => {
-                event.preventDefault();
-                onBid(hbarToTinybar(bidHbar), bidMessage);
-              }}
-            >
-              <div className="inline-grid">
-                <input value={bidHbar} onChange={(event) => setBidHbar(event.target.value)} placeholder="HBAR" />
-                <button className="primary-button">Place bid</button>
-              </div>
-              <textarea value={bidMessage} onChange={(event) => setBidMessage(event.target.value)} />
-            </form>
-          ) : null}
-
-          {user.user_type === "owner" ? (
-            <div className="stack">
-              <input value={fundSignature} onChange={(event) => setFundSignature(event.target.value)} placeholder="Signed transaction" />
-              <button className="secondary-button" onClick={() => onFund(fundSignature)}>
-                Fund escrow
-              </button>
-              <button className="primary-button" onClick={onConfirm}>
-                Confirm complete
-              </button>
-            </div>
-          ) : (
-            <div className="stack">
-              <textarea value={readyMessage} onChange={(event) => setReadyMessage(event.target.value)} />
-              <button className="primary-button" onClick={() => onMarkReady(readyMessage)}>
-                Mark ready
-              </button>
-            </div>
-          )}
-
-          <div className="stack">
-            <textarea value={disputeReason} onChange={(event) => setDisputeReason(event.target.value)} />
-            <button className="danger-button" onClick={() => onDispute(disputeReason)}>
-              Open dispute
-            </button>
-          </div>
-        </section>
-      </div>
-
-      <div className="two-column">
-        <BidsPanel bids={bids} user={user} onAward={onAward} />
-        <PhotosPanel photos={photos} />
-      </div>
-
-      <section className="panel">
-        <div className="panel-head">
-          <h3>HCS audit</h3>
-          <span>{auditEvents.length}</span>
-        </div>
-        <div className="timeline">
-          {auditEvents.map((event) => (
-            <div key={`${event.sequence_number}-${event.type}`} className="timeline-item">
-              <strong>{event.type}</strong>
-              <span>{formatDate(event.consensus_timestamp)}</span>
-              {event.tx_hash ? <small>{event.tx_hash}</small> : null}
-            </div>
-          ))}
-          {!auditEvents.length ? <span className="muted">No audit events returned yet.</span> : null}
-        </div>
-      </section>
+      <AiValidation photos={photos} auditEvents={auditEvents} />
+      <small>{bids.length} quotes in this job</small>
     </section>
+  );
+}
+
+function SendQuoteModal({ state, setState, onSendQuote }: { state: NonNullable<QuoteState>; setState: (state: QuoteState) => void; onSendQuote: (job: JobSummary, amount: string) => Promise<void> }) {
+  const [amount] = useState(state.amount);
+  const [sent, setSent] = useState(false);
+  if (sent) {
+    return (
+      <div className="modal-backdrop">
+        <section className="desktop-modal compact">
+          <SuccessPanel title="Quote sent" body={`₦${Number(amount).toLocaleString()}.00`} />
+        </section>
+      </div>
+    );
+  }
+  return (
+    <div className="modal-backdrop">
+      <section className="desktop-modal compact">
+        <button className="close-button" onClick={() => setState(null)}>×</button>
+        <h2>What is your quote?</h2>
+        <p className="muted">What is the total price the client will pay?</p>
+        <div className="money-input">₦{Number(amount || 0).toLocaleString()}.00</div>
+        <small className="info-strip">The minimum amount is ₦10,000</small>
+        <button className="primary-button" onClick={async () => { await onSendQuote(state.job, String(Number(amount || 0) / 100000)); setSent(true); }}>Send Quote</button>
+      </section>
+    </div>
+  );
+}
+
+function EarningsPanel({ activeJobs, archivedJobs }: { activeJobs: JobSummary[]; archivedJobs: JobSummary[] }) {
+  return (
+    <section className="split-grid">
+      <div className="hero-panel earnings">
+        <p className="eyebrow light">Supplier earnings</p>
+        <h2>₦570,000</h2>
+        <p>{activeJobs.length} pending jobs · {archivedJobs.length} paid jobs</p>
+      </div>
+      <div className="panel">
+        <PanelHead title="Transaction history" />
+        {["Escrow release", "HBAR payout", "Base fee audit", "Pending escrow"].map((item, index) => (
+          <div className="transaction-row" key={item}>
+            <span>{item}<small>Hedera transaction #{index + 1}</small></span>
+            <b>{index === 3 ? "Pending" : "Paid"}</b>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function MessagesPanel({ messages }: { messages: string[] }) {
+  return (
+    <section className="panel">
+      <PanelHead title="Messages" count={messages.length} />
+      <div className="message-list">
+        {messages.map((message) => <p key={message}>{message}</p>)}
+      </div>
+    </section>
+  );
+}
+
+function ProfilePanel({ profile, role }: { profile: Profile; role: string }) {
+  return (
+    <section className="split-grid">
+      <div className="panel profile-panel">
+        <img src={profile.photoUrl} alt="" />
+        <h2>{profile.firstName} {profile.lastName}</h2>
+        <p>{role} · {profile.serviceArea}</p>
+      </div>
+      <div className="panel detail-stack">
+        <PanelHead title={`${role} profile`} />
+        <Fact label="Location" value={profile.location} />
+        <Fact label="Payment" value={profile.paymentToken} />
+        <Fact label="Portfolio" value={role === "Supplier" ? "12 completed jobs" : "3 service requests"} />
+        <Fact label="Rating" value={role === "Supplier" ? "4.8" : "Verified owner"} />
+      </div>
+    </section>
+  );
+}
+
+function EscrowFlowCard() {
+  return (
+    <section className="panel detail-stack">
+      <PanelHead title="Escrow flow" />
+      {["Owner accepts quote", "20% base fee paid", "Escrow funded in HBAR", "Supplier uploads proof", "AI validates work", "Owner confirms", "Payment released"].map((item, index) => (
+        <div className="flow-row" key={item}><span>{index + 1}</span>{item}</div>
+      ))}
+    </section>
+  );
+}
+
+function AiValidation({ photos, auditEvents }: { photos: Photo[]; auditEvents: AuditEvent[] }) {
+  const passed = photos.some((photo) => photo.review_status === "passed");
+  const needsEvidence = photos.some((photo) => photo.review_status === "needs_retake" || photo.review_status === "failed");
+  const status = passed ? "Validation passed" : needsEvidence ? "Needs more evidence" : photos.length ? "AI reviewing" : "Waiting for proof";
+  return (
+    <div className="ai-panel">
+      <h3>EscrowEye AI validation</h3>
+      <Fact label="Status" value={status} />
+      <Fact label="Confidence" value={passed ? "95%" : photos.length ? "72%" : "Pending"} />
+      <Fact label="Audit trail" value={`${auditEvents.length} events`} />
+      <div className="proof-grid">
+        {photos.slice(0, 4).map((photo) => <span key={photo.id}>Proof #{photo.sequence}<small>{truncateMiddle(photo.cid, 8)}</small></span>)}
+        {!photos.length ? <small>No images/videos uploaded yet.</small> : null}
+      </div>
+    </div>
+  );
+}
+
+function JobRow({ job, action, onClick }: { job: JobSummary; action?: string; onClick: () => void }) {
+  return (
+    <button className="job-row" onClick={onClick}>
+      <span><strong>{job.title}</strong><small>{job.home.address}</small></span>
+      <span>{formatDate(job.created_at)}</span>
+      <b>{tinybarToHbar(job.lowest_bid_tinybar ?? job.suggested_price_tinybar)} HBAR</b>
+      {action ? <em>{action}</em> : <i className={`tag tag-${job.status}`}>{statusLabel(job.status)}</i>}
+    </button>
+  );
+}
+
+function StaticJobRow({ job, tag }: { job: (typeof sampleJobs)[number]; tag: string }) {
+  return (
+    <article className="job-row static">
+      <span><strong>{job.title}</strong><small>{job.address}</small></span>
+      <span>{job.date}</span>
+      <b>{job.amount}</b>
+      <i className="tag">{tag}</i>
+    </article>
+  );
+}
+
+function FlowStep({ title, hint, children }: { title: string; hint: string; children: React.ReactNode }) {
+  return (
+    <div className="detail-stack">
+      <h2>{title}</h2>
+      <p className="muted">{hint}</p>
+      {children}
+    </div>
+  );
+}
+
+function PanelHead({ title, count }: { title: string; count?: number }) {
+  return (
+    <div className="panel-head">
+      <h2>{title}</h2>
+      {count !== undefined ? <span>{count}</span> : null}
+    </div>
   );
 }
 
@@ -854,170 +1097,37 @@ function Metric({ label, value }: { label: string; value: string }) {
   );
 }
 
-function BidsPanel({ bids, user, onAward }: { bids: Bid[]; user: ApiUser; onAward: (bidId: number) => Promise<void> }) {
+function Fact({ label, value }: { label: string; value: string }) {
   return (
-    <section className="panel">
-      <div className="panel-head">
-        <h3>Bids</h3>
-        <span>{bids.length}</span>
-      </div>
-      <div className="list">
-        {bids.map((bid) => (
-          <article key={bid.id} className="mini-card bid-card">
-            <div>
-              <strong>{tinybarToHbar(bid.amount_tinybar)} HBAR</strong>
-              <span>{bid.supplier?.hedera_account_id ?? "Supplier"}</span>
-              <small>{bid.message || "No message"} · {bid.status}</small>
-            </div>
-            {user.user_type === "owner" ? (
-              <button className="secondary-button" onClick={() => onAward(bid.id)}>
-                Award
-              </button>
-            ) : null}
-          </article>
-        ))}
-        {!bids.length ? <span className="muted">No bids returned yet.</span> : null}
-      </div>
-    </section>
-  );
-}
-
-function PhotosPanel({ photos }: { photos: Photo[] }) {
-  return (
-    <section className="panel">
-      <div className="panel-head">
-        <h3>Photos</h3>
-        <span>{photos.length}</span>
-      </div>
-      <div className="photo-grid">
-        {photos.map((photo) => (
-          <article key={photo.id} className="photo-tile">
-            <div className="photo-placeholder">#{photo.sequence}</div>
-            <strong>{photo.room?.name ?? "Unassigned room"}</strong>
-            <span>{photo.review_status ?? "pending"}</span>
-            <small>{photo.cid}</small>
-          </article>
-        ))}
-        {!photos.length ? <span className="muted">No photos uploaded yet.</span> : null}
-      </div>
-    </section>
-  );
-}
-
-function ConversationPanel({
-  job,
-  messages,
-  photos,
-  rooms,
-  onSend,
-  onUpload,
-}: {
-  job: JobDetail | null;
-  messages: Message[];
-  photos: Photo[];
-  rooms: Room[];
-  onSend: (body: string, photoIds: number[]) => Promise<void>;
-  onUpload: (files: File[], roomId?: number) => Promise<void>;
-}) {
-  const [body, setBody] = useState("Can the agent review the latest photos?");
-  const [selectedPhotoIds, setSelectedPhotoIds] = useState<number[]>([]);
-  const [roomId, setRoomId] = useState("");
-  const fileRef = useRef<HTMLInputElement | null>(null);
-
-  return (
-    <aside className="conversation">
-      <div className="panel-head">
-        <div>
-          <p className="eyebrow">Conversation</p>
-          <h2>{job ? `Job #${job.id}` : "No job"}</h2>
-        </div>
-        <span>{messages.length}</span>
-      </div>
-
-      <div className="message-list">
-        {messages.map((message) => (
-          <article key={message.id} className={`message message-${message.sender_type}`}>
-            <div className="message-meta">
-              <strong>{message.sender_type === "human" ? message.sender?.hedera_account_id ?? "User" : message.sender_type}</strong>
-              <span>{formatDate(message.created_at)}</span>
-            </div>
-            <p>{message.body}</p>
-            {message.photos?.length ? (
-              <div className="chips">
-                {message.photos.map((photo) => (
-                  <span key={photo.id}>photo #{photo.sequence}</span>
-                ))}
-              </div>
-            ) : null}
-          </article>
-        ))}
-        {!messages.length ? <EmptyState title="No messages" body="Human, agent, and system messages render here." /> : null}
-      </div>
-
-      <form
-        className="composer"
-        onSubmit={(event) => {
-          event.preventDefault();
-          if (!job || !body.trim()) return;
-          onSend(body, selectedPhotoIds);
-          setBody("");
-          setSelectedPhotoIds([]);
-        }}
-      >
-        <textarea value={body} onChange={(event) => setBody(event.target.value)} disabled={!job} />
-        <div className="chips selectable">
-          {photos.map((photo) => (
-            <button
-              key={photo.id}
-              type="button"
-              className={selectedPhotoIds.includes(photo.id) ? "active" : ""}
-              onClick={() =>
-                setSelectedPhotoIds((current) => (current.includes(photo.id) ? current.filter((id) => id !== photo.id) : [...current, photo.id]))
-              }
-            >
-              photo #{photo.sequence}
-            </button>
-          ))}
-        </div>
-        <button className="primary-button" disabled={!job}>
-          Send
-        </button>
-      </form>
-
-      <form
-        className="upload-box"
-        onSubmit={(event) => {
-          event.preventDefault();
-          const files = Array.from(fileRef.current?.files ?? []);
-          if (!job || !files.length) return;
-          onUpload(files, roomId ? Number(roomId) : undefined);
-          if (fileRef.current) fileRef.current.value = "";
-        }}
-      >
-        <select value={roomId} onChange={(event) => setRoomId(event.target.value)}>
-          <option value="">Agent assigns room</option>
-          {rooms.map((room) => (
-            <option key={room.id} value={room.id}>
-              {room.name}
-            </option>
-          ))}
-        </select>
-        <input ref={fileRef} type="file" multiple accept="image/*" disabled={!job} />
-        <button className="secondary-button" disabled={!job}>
-          Upload photos
-        </button>
-      </form>
-    </aside>
-  );
-}
-
-function EmptyState({ title, body }: { title: string; body: string }) {
-  return (
-    <div className="empty-state">
-      <strong>{title}</strong>
-      <span>{body}</span>
+    <div className="fact-row">
+      <small>{label}</small>
+      <strong>{value}</strong>
     </div>
   );
+}
+
+function EmptyPanel({ title, body }: { title: string; body: string }) {
+  return (
+    <section className="panel empty-panel">
+      <h2>{title}</h2>
+      <p>{body}</p>
+    </section>
+  );
+}
+
+function SuccessPanel({ title, body }: { title: string; body: string }) {
+  return (
+    <div className="success-panel">
+      <span>✓</span>
+      <small>Success</small>
+      <h2>{title}</h2>
+      <strong>{body}</strong>
+    </div>
+  );
+}
+
+function Notice({ text, loading }: { text: string; loading?: boolean }) {
+  return <div className="notice">{loading ? "Working..." : text}</div>;
 }
 
 export default App;
