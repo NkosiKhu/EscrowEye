@@ -55,14 +55,12 @@ def create_proof_router(
         return {"proof": results}
 
     @router.get("/service-requests/{request_id}/proof")
-    async def list_service_proof(request_id: int, user: dict[str, Any] = Depends(current_user)):
-        _ = user
+    async def list_service_proof(request_id: int, _user: dict[str, Any] = Depends(current_user)):
         async with db() as session:
             return await service(session).list_proof(request_id)
 
     @router.patch("/service-requests/{request_id}/proof/{proof_id}")
-    async def update_service_proof(request_id: int, proof_id: int, body: ProofPatch, user: dict[str, Any] = Depends(current_user)):
-        _ = user
+    async def update_service_proof(request_id: int, proof_id: int, body: ProofPatch, _user: dict[str, Any] = Depends(current_user)):
         async with db() as session:
             return await service(session).update_proof(request_id, proof_id, body)
 

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 from datetime import datetime, timezone
 from typing import Any
 
@@ -10,10 +9,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
 from app.domain.enums import AIValidationStatus, EscrowStatus, JobStatus
-from app.infrastructure.hcs_service import HCSService
 from app.infrastructure.models import (
     AIValidation,
-    AuditEvent,
     Bid,
     EscrowTransaction,
     Home,
@@ -22,6 +19,7 @@ from app.infrastructure.models import (
     Photo,
     User,
 )
+from app.services._base import add_audit, get_job, get_user, mock_cid
 
 
 logger = get_logger("escroweye.marketplace")
@@ -85,27 +83,6 @@ def list_workers(category: str | None = None, location: str | None = None) -> li
         needle = location.lower()
         workers = [w for w in workers if needle in w["location"].lower()]
     return workers
-
-
-def mock_cid(content: bytes, filename: str) -> str:
-    digest = hashlib.sha256(filename.encode() + b":" + content).hexdigest()
-    return "bafy" + digest[:45]
-
-
-async def _get_job(session: AsyncSession, job_id: int) -> Job:
-    result = await session.execute(select(Job).where(Job.id == job_id))
-    job = result.scalar_one_or_none()
-    if job is None:
-        raise HTTPException(status_code=404, detail="not_found")
-    return job
-
-
-async def _get_user(session: AsyncSession, user_id: int) -> User:
-    result = await session.execute(select(User).where(User.id == user_id))
-    user = result.scalar_one_or_none()
-    if user is None:
-        raise HTTPException(status_code=404, detail="not_found")
-    return user
 
 
 async def set_user_role(session: AsyncSession, user: dict[str, Any], role: str) -> dict[str, str]:
@@ -176,7 +153,7 @@ async def list_service_requests(session: AsyncSession, user: dict[str, Any]) -> 
 
 
 async def get_service_request(session: AsyncSession, request_id: int) -> dict[str, Any]:
-    job = await _get_job(session, request_id)
+    job = await get_job(session, request_id)
     return await service_request_payload(session, job)
 
 
@@ -190,7 +167,7 @@ async def update_service_request(session: AsyncSession, request_id: int, body: A
     job.suggested_price_tinybar = body.budget_amount
     job.access_notes = body.location_description
     job.available_times = body.schedule
-    await add_local_audit(session, request_id, "service_request_updated")
+    await add_audit(session, request_id, "service_request_updated")
     return await get_service_request(session, request_id)
 
 
@@ -200,18 +177,18 @@ async def cancel_service_request(session: AsyncSession, request_id: int, user: d
     if job is None:
         raise HTTPException(status_code=404, detail="not_found")
     job.status = "cancelled"
-    await add_local_audit(session, request_id, "service_request_cancelled")
+    await add_audit(session, request_id, "service_request_cancelled")
     return {"request_id": request_id, "status": "cancelled"}
 
 
 async def supplier_accept_job(session: AsyncSession, job_id: int, user: dict[str, Any]) -> dict[str, Any]:
     require_role(user, "supplier")
-    await _get_job(session, job_id)
+    await get_job(session, job_id)
     result = await session.execute(select(Job).where(Job.id == job_id))
     job = result.scalar_one()
     job.supplier_user_id = user["id"]
     job.status = "accepted"
-    await add_local_audit(session, job_id, "supplier_accepted")
+    await add_audit(session, job_id, "supplier_accepted")
     return {"job_id": job_id, "status": "accepted"}
 
 
@@ -222,7 +199,7 @@ async def supplier_mark_processing(session: AsyncSession, job_id: int, user: dic
     if job is None:
         raise HTTPException(status_code=404, detail="not_found")
     job.status = "processing"
-    await add_local_audit(session, job_id, "supplier_processing")
+    await add_audit(session, job_id, "supplier_processing")
     return {"job_id": job_id, "status": "processing"}
 
 
@@ -233,7 +210,7 @@ async def supplier_mark_complete(session: AsyncSession, job_id: int, user: dict[
     if job is None:
         raise HTTPException(status_code=404, detail="not_found")
     job.status = "awaiting_owner_confirmation"
-    await add_local_audit(session, job_id, "supplier_marked_complete")
+    await add_audit(session, job_id, "supplier_marked_complete")
     return {"job_id": job_id, "status": "awaiting_owner_confirmation"}
 
 
@@ -255,7 +232,7 @@ async def message_payload(session: AsyncSession, msg: Message) -> dict[str, Any]
 
 
 async def list_service_messages(session: AsyncSession, request_id: int) -> dict[str, Any]:
-    await _get_job(session, request_id)
+    await get_job(session, request_id)
     result = await session.execute(select(Message).where(Message.job_id == request_id).order_by(Message.id))
     messages = result.scalars().all()
     results = []
@@ -265,7 +242,7 @@ async def list_service_messages(session: AsyncSession, request_id: int) -> dict[
 
 
 async def create_service_message(session: AsyncSession, request_id: int, body: Any, user: dict[str, Any]) -> dict[str, Any]:
-    await _get_job(session, request_id)
+    await get_job(session, request_id)
     msg = Message(
         job_id=request_id,
         sender_user_id=user["id"],
@@ -298,7 +275,7 @@ async def reject_quote(session: AsyncSession, quote_id: int, user: dict[str, Any
     if job_result.scalar_one_or_none() is None:
         raise HTTPException(status_code=403, detail="owner_role_required")
     bid.status = "rejected"
-    await add_local_audit(session, bid.job_id, "quote_rejected")
+    await add_audit(session, bid.job_id, "quote_rejected")
     return {"quote_id": quote_id, "status": "rejected"}
 
 
@@ -308,7 +285,7 @@ async def withdraw_quote(session: AsyncSession, quote_id: int, user: dict[str, A
     if bid is None:
         raise HTTPException(status_code=404, detail="not_found")
     bid.status = "withdrawn"
-    await add_local_audit(session, bid.job_id, "quote_withdrawn")
+    await add_audit(session, bid.job_id, "quote_withdrawn")
     return {"quote_id": quote_id, "status": "withdrawn"}
 
 
@@ -323,13 +300,13 @@ async def pay_base_fee(session: AsyncSession, request_id: int, user: dict[str, A
     bid = bid_result.scalar_one()
     fee = base_fee_for(bid.amount_tinybar)
     await record_transaction(session, request_id, "base_fee", fee, "HBAR", "settled", f"local:base-fee:{request_id}")
-    await add_local_audit(session, request_id, "base_fee_paid", {"amount": fee})
+    await add_audit(session, request_id, "base_fee_paid", {"amount": fee})
     logger.info("escrow.base_fee_paid request_id=%s owner_wallet=%s amount=%s", request_id, user["hedera_account_id"], fee)
     return {"request_id": request_id, "status": "base_fee_paid", "amount": fee}
 
 
 async def service_escrow(session: AsyncSession, request_id: int) -> dict[str, Any]:
-    job = await _get_job(session, request_id)
+    job = await get_job(session, request_id)
     bid = None
     if job.accepted_bid_id is not None:
         bid_result = await session.execute(select(Bid).where(Bid.id == job.accepted_bid_id))
@@ -344,11 +321,11 @@ async def service_escrow(session: AsyncSession, request_id: int) -> dict[str, An
 
 
 async def dispute_service_request(session: AsyncSession, request_id: int, reason: str, user: dict[str, Any]) -> dict[str, Any]:
-    await _get_job(session, request_id)
+    await get_job(session, request_id)
     job_result = await session.execute(select(Job).where(Job.id == request_id))
     job = job_result.scalar_one()
     job.status = "disputed"
-    await add_local_audit(session, request_id, "dispute_opened", {"reason": reason, "user_id": user["id"]})
+    await add_audit(session, request_id, "dispute_opened", {"reason": reason, "user_id": user["id"]})
     return {"request_id": request_id, "status": "disputed"}
 
 
@@ -363,38 +340,17 @@ async def get_ai_validation(session: AsyncSession, request_id: int) -> dict[str,
 
 
 async def request_ai_corrections(session: AsyncSession, request_id: int, body: dict[str, Any]) -> dict[str, Any]:
-    await _get_job(session, request_id)
+    await get_job(session, request_id)
     job_result = await session.execute(select(Job).where(Job.id == request_id))
     job = job_result.scalar_one()
     job.status = "needs_revision"
-    await add_local_audit(session, request_id, "ai_requested_corrections", body)
+    await add_audit(session, request_id, "ai_requested_corrections", body)
     return {"request_id": request_id, "status": "needs_more_evidence"}
 
 
-async def audit_events(session: AsyncSession, request_id: int) -> dict[str, Any]:
-    job = await _get_job(session, request_id)
-    result = await session.execute(
-        select(AuditEvent).where(AuditEvent.job_id == request_id).order_by(AuditEvent.sequence_number)
-    )
-    rows = result.scalars().all()
-    events = []
-    for row in rows:
-        item = {"type": row.type, "job_id": row.job_id, "tx_hash": row.tx_hash, "sequence_number": row.sequence_number, "consensus_timestamp": row.consensus_timestamp}
-        if item["tx_hash"] is None:
-            del item["tx_hash"]
-        events.append(item)
-    return {"hcs_topic_id": job.hcs_topic_id, "events": events}
-
-
 async def hcs_topic(session: AsyncSession, request_id: int) -> dict[str, Any]:
-    job = await _get_job(session, request_id)
+    job = await get_job(session, request_id)
     return {"request_id": request_id, "hcs_topic_id": job.hcs_topic_id}
-
-
-async def create_audit_event(session: AsyncSession, request_id: int, body: dict[str, Any]) -> dict[str, Any]:
-    await _get_job(session, request_id)
-    await add_local_audit(session, request_id, str(body.get("event_type", "custom_event")), body)
-    return {"request_id": request_id, "status": "recorded"}
 
 
 async def supplier_earnings(session: AsyncSession, user: dict[str, Any]) -> dict[str, Any]:
@@ -438,28 +394,6 @@ async def owner_payments(session: AsyncSession, user: dict[str, Any]) -> dict[st
     return {"payments": [{c.name: getattr(r, c.name) for c in EscrowTransaction.__table__.columns} for r in rows]}
 
 
-async def add_local_audit(session: AsyncSession, job_id: int, event_type: str, payload: dict[str, Any] | None = None) -> None:
-    event_payload = payload or {}
-    job_result = await session.execute(select(Job.hcs_topic_id).where(Job.id == job_id))
-    job_row = job_result.scalar_one_or_none()
-    hcs_result = HCSService().submit_event(event_type, {"job_id": job_id, **event_payload}, job_row if job_row else None)
-    seq_result = await session.execute(
-        select(func.coalesce(func.max(AuditEvent.sequence_number), 0) + 1).where(AuditEvent.job_id == job_id)
-    )
-    seq_val = seq_result.scalar() or 1
-    audit = AuditEvent(
-        job_id=job_id,
-        type=event_type,
-        tx_hash=hcs_result.tx_id,
-        sequence_number=seq_val,
-        consensus_timestamp=datetime.now(timezone.utc).isoformat(),
-        hcs_status=hcs_result.status,
-        payload_json=str(event_payload),
-    )
-    session.add(audit)
-    logger.info("audit.recorded job_id=%s event=%s hcs_status=%s tx_id=%s", job_id, event_type, hcs_result.status, hcs_result.tx_id)
-
-
 async def create_request(session: AsyncSession, body: Any, user: dict[str, Any]) -> dict[str, Any]:
     require_role(user, "owner")
     now = datetime.now(timezone.utc).isoformat()
@@ -489,13 +423,13 @@ async def create_request(session: AsyncSession, body: Any, user: dict[str, Any])
     )
     session.add(job)
     await session.flush()
-    await add_local_audit(session, job.id, "service_request_created", {"category": body.category})
+    await add_audit(session, job.id, "service_request_created", {"category": body.category})
     logger.info("service_request.created request_id=%s owner_wallet=%s category=%s budget=%s", job.id, user["hedera_account_id"], body.category, body.budget_amount)
     return {"id": job.id, "status": JobStatus.QUOTE_REQUESTED, "hcs_topic_id": hcs_topic}
 
 
 async def quote_payload(session: AsyncSession, bid: Bid) -> dict[str, Any]:
-    supplier = await _get_user(session, bid.supplier_user_id) if bid.supplier_user_id else None
+    supplier = await get_user(session, bid.supplier_user_id) if bid.supplier_user_id else None
     return {
         "id": bid.id,
         "request_id": bid.job_id,
@@ -511,7 +445,7 @@ async def quote_payload(session: AsyncSession, bid: Bid) -> dict[str, Any]:
 
 async def create_quote(session: AsyncSession, request_id: int, body: Any, user: dict[str, Any]) -> dict[str, Any]:
     require_role(user, "supplier")
-    await _get_job(session, request_id)
+    await get_job(session, request_id)
     now = datetime.now(timezone.utc).isoformat()
     bid = Bid(
         job_id=request_id,
@@ -528,7 +462,7 @@ async def create_quote(session: AsyncSession, request_id: int, body: Any, user: 
     job = job_result.scalar_one()
     job.status = JobStatus.QUOTE_RECEIVED
     job.updated_at = now
-    await add_local_audit(session, request_id, "quote_submitted", {"amount": body.amount})
+    await add_audit(session, request_id, "quote_submitted", {"amount": body.amount})
     logger.info("quote.created request_id=%s quote_id=%s supplier_wallet=%s amount=%s", request_id, bid.id, user["hedera_account_id"], body.amount)
     return await quote_payload(session, bid)
 
@@ -552,7 +486,7 @@ async def accept_quote(session: AsyncSession, quote_id: int, user: dict[str, Any
     job.accepted_bid_id = quote_id
     job.status = JobStatus.QUOTE_ACCEPTED
     job.updated_at = now
-    await add_local_audit(session, bid.job_id, "quote_accepted", {"quote_id": quote_id})
+    await add_audit(session, bid.job_id, "quote_accepted", {"quote_id": quote_id})
     logger.info("quote.accepted request_id=%s quote_id=%s owner_wallet=%s amount=%s", bid.job_id, quote_id, user["hedera_account_id"], bid.amount_tinybar)
     return {
         "request_id": bid.job_id,
@@ -580,7 +514,7 @@ async def fund_escrow(session: AsyncSession, request_id: int, user: dict[str, An
     job.escrow_account_id = escrow
     job.updated_at = datetime.now(timezone.utc).isoformat()
     await record_transaction(session, request_id, "escrow_fund", bid.amount_tinybar, "HBAR", "settled", f"local:escrow:{request_id}")
-    await add_local_audit(session, request_id, "escrow_funded", {"amount": bid.amount_tinybar})
+    await add_audit(session, request_id, "escrow_funded", {"amount": bid.amount_tinybar})
     logger.info("escrow.funded request_id=%s owner_wallet=%s amount=%s escrow=%s", request_id, user["hedera_account_id"], bid.amount_tinybar, escrow)
     return {"request_id": request_id, "status": JobStatus.ESCROW_FUNDED, "escrow_status": EscrowStatus.ESCROW_FUNDED, "escrow_account_id": escrow}
 
@@ -625,7 +559,7 @@ async def run_ai_validation(session: AsyncSession, request_id: int) -> dict[str,
         created_at=now,
     )
     session.add(ai)
-    await add_local_audit(session, request_id, "ai_validation_completed", {"status": status_val})
+    await add_audit(session, request_id, "ai_validation_completed", {"status": status_val})
     logger.info("ai.validation_completed request_id=%s status=%s confidence=%s", request_id, status_val, confidence)
     return {"request_id": request_id, "status": status_val, "confidence_score": confidence}
 
@@ -644,7 +578,7 @@ async def confirm_satisfaction(session: AsyncSession, request_id: int, user: dic
     if validation is None or validation.status != AIValidationStatus.PASSED:
         raise HTTPException(status_code=409, detail="validation_not_passed")
     job.status = JobStatus.COMPLETED
-    await add_local_audit(session, request_id, "owner_confirmed")
+    await add_audit(session, request_id, "owner_confirmed")
     return {"request_id": request_id, "status": JobStatus.COMPLETED, "escrow_status": EscrowStatus.RELEASE_READY}
 
 
@@ -664,7 +598,7 @@ async def release_payment(session: AsyncSession, request_id: int, user: dict[str
     amount = bid.amount_tinybar if bid else job.suggested_price_tinybar
     tx_id = f"local:release:{request_id}"
     await record_transaction(session, request_id, "release", amount, "HBAR", "settled", tx_id)
-    await add_local_audit(session, request_id, "payment_released", {"tx_id": tx_id})
+    await add_audit(session, request_id, "payment_released", {"tx_id": tx_id})
     logger.info("escrow.payment_released request_id=%s owner_wallet=%s amount=%s tx_id=%s", request_id, user["hedera_account_id"], amount, tx_id)
     return {"request_id": request_id, "status": JobStatus.COMPLETED, "escrow_status": EscrowStatus.RELEASED, "hedera_tx_id": tx_id}
 

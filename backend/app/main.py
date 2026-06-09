@@ -2,20 +2,18 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import os
 import secrets
 import time
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.routes.ai_validation import create_ai_validation_router
@@ -30,6 +28,7 @@ from app.api.routes.quotes import create_quotes_router
 from app.api.routes.service_requests import create_service_requests_router
 from app.api.routes.workers import router as workers_router
 from app.api.routes.x402 import router as x402_router
+from app.core.config import settings
 from app.core.logging import (
     configure_logging,
     get_logger,
@@ -41,30 +40,21 @@ from app.infrastructure.database import (
     get_session,
 )
 from app.infrastructure.models import User
-from app.infrastructure.x402_service import X402Service
 from app.services import marketplace as marketplace_service
+from app.services._base import add_audit
 
-
-BASE_DIR = Path(__file__).resolve().parents[1]
-PROJECT_DIR = BASE_DIR.parent
-UPLOAD_DIR = BASE_DIR / "uploads"
 
 configure_logging()
 logger = get_logger("escroweye.main")
 
-SECRET = os.getenv("ESCROWEYE_SECRET", "escroweye-dev-secret").encode()
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openai/gpt-4o")
-x402_service = X402Service()
-
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     await load_local_creds()
-    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    settings.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     await create_tables()
     async with get_session() as session:
         await seed_service_categories(session)
-    logger.info("app.startup db_engine=async_sqlalchemy upload_dir=%s", UPLOAD_DIR)
+    logger.info("app.startup db_engine=async_sqlalchemy upload_dir=%s", settings.UPLOAD_DIR)
     yield
     await close_engine()
     logger.info("app.shutdown")
@@ -74,7 +64,9 @@ app = FastAPI(title="EscrowEye API", version="0.1.0", lifespan=lifespan)
 
 
 async def load_local_creds() -> None:
-    creds_path = PROJECT_DIR / "creds"
+    import os
+
+    creds_path = settings.PROJECT_DIR / "creds"
     if not creds_path.exists() or not creds_path.is_file():
         return
     for raw_line in creds_path.read_text().splitlines():
@@ -116,12 +108,7 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
 app.add_middleware(RequestLoggingMiddleware)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://localhost:5174",
-        "http://127.0.0.1:5174",
-    ],
+    allow_origins=settings.CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -137,7 +124,7 @@ def now_iso() -> str:
 def token_for(user_id: int) -> str:
     ts = str(int(time.time()))
     payload = f"{user_id}.{ts}.{secrets.token_hex(8)}"
-    sig = hmac.new(SECRET, payload.encode(), hashlib.sha256).hexdigest()
+    sig = hmac.new(settings.SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
     return f"{payload}.{sig}"
 
 
@@ -146,7 +133,7 @@ def verify_token(token: str) -> int:
     if len(parts) != 4:
         raise HTTPException(status_code=401, detail="invalid_token")
     payload = ".".join(parts[:3])
-    expected = hmac.new(SECRET, payload.encode(), hashlib.sha256).hexdigest()
+    expected = hmac.new(settings.SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
     if not hmac.compare_digest(expected, parts[3]):
         raise HTTPException(status_code=401, detail="invalid_token")
     return int(parts[0])
@@ -203,28 +190,6 @@ async def seed_service_categories(session: AsyncSession) -> None:
     await session.commit()
 
 
-async def add_audit_async(session: AsyncSession, job_id: int, event_type: str, tx_hash: str | None = None) -> None:
-    from app.infrastructure.hcs_service import HCSService
-    from app.infrastructure.models import AuditEvent
-
-    result = await session.execute(
-        select(func.coalesce(func.max(AuditEvent.sequence_number), 0) + 1).where(AuditEvent.job_id == job_id)
-    )
-    seq = result.scalar()
-    hcs_result = HCSService().submit_event(event_type, {"job_id": job_id})
-    audit = AuditEvent(
-        job_id=job_id,
-        type=event_type,
-        tx_hash=tx_hash or hcs_result.tx_id,
-        sequence_number=seq,
-        consensus_timestamp=now_iso(),
-        hcs_status=hcs_result.status,
-        payload_json="{}",
-    )
-    session.add(audit)
-
-
-
 
 
 @app.get("/")
@@ -263,29 +228,25 @@ app.include_router(
         now_iso=now_iso,
         current_user=current_user_dep,
         public_user=public_user,
-        add_audit=add_audit_async,
-        base_dir=BASE_DIR,
-        upload_dir=UPLOAD_DIR,
-        openrouter_api_key=OPENROUTER_API_KEY,
-        openrouter_model=OPENROUTER_MODEL,
-        x402_service=x402_service,
+        add_audit=add_audit,
+        base_dir=settings.BASE_DIR,
+        upload_dir=settings.UPLOAD_DIR,
+        openrouter_api_key=settings.OPENROUTER_API_KEY,
+        openrouter_model=settings.OPENROUTER_MODEL,
     )
 )
 
 app.include_router(
     create_service_requests_router(
         db=get_session,
-        now_iso=now_iso,
         current_user=current_user_dep,
         public_user=public_user,
-        x402_service=x402_service,
     )
 )
 
 app.include_router(
     create_quotes_router(
         db=get_session,
-        now_iso=now_iso,
         current_user=current_user_dep,
     )
 )
@@ -293,7 +254,6 @@ app.include_router(
 app.include_router(
     create_escrow_router(
         db=get_session,
-        now_iso=now_iso,
         current_user=current_user_dep,
     )
 )
@@ -303,14 +263,13 @@ app.include_router(
         db=get_session,
         now_iso=now_iso,
         current_user=current_user_dep,
-        upload_dir=UPLOAD_DIR,
+        upload_dir=settings.UPLOAD_DIR,
     )
 )
 
 app.include_router(
     create_ai_validation_router(
         db=get_session,
-        now_iso=now_iso,
         current_user=current_user_dep,
     )
 )

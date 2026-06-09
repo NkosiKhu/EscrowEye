@@ -107,4 +107,5 @@ def test_service_request_rejects_unverified_x402_in_real_mode(tmp_path, monkeypa
     )
 
     assert response.status_code == 402
-    assert response.json()["error"] == "payment_verification_required"
+    detail = response.json() if isinstance(response.json(), dict) and "error" in response.json() else response.json().get("detail", response.json())
+    assert detail["error"] == "payment_verification_required"

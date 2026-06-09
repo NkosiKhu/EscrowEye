@@ -2,11 +2,10 @@ from __future__ import annotations
 
 from typing import Any, Callable, Optional
 
-from fastapi import APIRouter, Depends, Header, Request
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
-from app.infrastructure.x402_service import X402ConfigurationError
+from app.api.dependencies import require_x402_payment
 from app.services import marketplace as marketplace_service
 from app.services.demo_seed import seed_demo_data
 
@@ -38,10 +37,8 @@ class MessageCreateIn(BaseModel):
 def create_service_requests_router(
     *,
     db: Callable,
-    now_iso: Callable[[], str],
     current_user: Callable,
     public_user: Callable,
-    x402_service: Any,
 ) -> APIRouter:
     router = APIRouter(prefix="/api", tags=["service-requests"])
 
@@ -59,21 +56,9 @@ def create_service_requests_router(
     @router.post("/service-requests", status_code=201)
     async def create_service_request(
         body: ServiceRequestIn,
-        request: Request,
-        x_payment: str | None = Header(default=None),
-        x_402_payment: str | None = Header(default=None),
         user: dict[str, Any] = Depends(current_user),
+        _payment: dict[str, Any] = Depends(require_x402_payment),
     ):
-        _ = x_payment, x_402_payment
-        try:
-            payment = x402_service.authorize_headers(dict(request.headers))
-        except X402ConfigurationError as error:
-            return JSONResponse(
-                status_code=402,
-                content={"error": "payment_verification_required", "detail": str(error), "payment_requirements": x402_service.payment_requirements()},
-            )
-        if not payment.get("valid"):
-            return JSONResponse(status_code=402, content={"error": "payment_required", "payment_requirements": x402_service.payment_requirements()})
         async with db() as session:
             return await marketplace_service.create_request(session, body, user)
 
@@ -83,8 +68,7 @@ def create_service_requests_router(
             return await marketplace_service.list_service_requests(session, user)
 
     @router.get("/service-requests/{request_id}")
-    async def get_service_request(request_id: int, user: dict[str, Any] = Depends(current_user)):
-        _ = user
+    async def get_service_request(request_id: int, _user: dict[str, Any] = Depends(current_user)):
         async with db() as session:
             return await marketplace_service.get_service_request(session, request_id)
 
@@ -132,8 +116,7 @@ def create_service_requests_router(
             return await marketplace_service.supplier_mark_complete(session, job_id, user)
 
     @router.get("/service-requests/{request_id}/messages")
-    async def list_service_messages(request_id: int, user: dict[str, Any] = Depends(current_user)):
-        _ = user
+    async def list_service_messages(request_id: int, _user: dict[str, Any] = Depends(current_user)):
         async with db() as session:
             return await marketplace_service.list_service_messages(session, request_id)
 
@@ -143,8 +126,7 @@ def create_service_requests_router(
             return await marketplace_service.create_service_message(session, request_id, body, user)
 
     @router.post("/demo/seed")
-    async def seed_demo(user: dict[str, Any] = Depends(current_user)):
-        _ = user
+    async def seed_demo(_user: dict[str, Any] = Depends(current_user)):
         async with db() as session:
             return await seed_demo_data(session)
 

@@ -3,11 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from fastapi import APIRouter, Depends, File, Form, Header, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, UploadFile
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 
-from app.infrastructure.x402_service import X402ConfigurationError
+from app.api.dependencies import require_x402_payment
 from app.services.job_service import JobService
 
 
@@ -59,7 +59,6 @@ def create_jobs_router(
     upload_dir: Path,
     openrouter_api_key: str | None,
     openrouter_model: str,
-    x402_service: Any,
 ) -> APIRouter:
     router = APIRouter(prefix="/api", tags=["jobs"])
 
@@ -83,33 +82,19 @@ def create_jobs_router(
     @router.post("/jobs", status_code=201)
     async def create_job(
         body: JobIn,
-        request: Request,
-        x_payment: str | None = Header(default=None),
-        x_402_payment: str | None = Header(default=None),
         user: dict[str, Any] = Depends(current_user),
+        _payment: dict[str, Any] = Depends(require_x402_payment),
     ):
-        _ = x_payment, x_402_payment
-        try:
-            payment = x402_service.authorize_headers(dict(request.headers))
-        except X402ConfigurationError as error:
-            return JSONResponse(
-                status_code=402,
-                content={"error": "payment_verification_required", "detail": str(error), "payment_requirements": x402_service.payment_requirements()},
-            )
-        if not payment.get("valid"):
-            return JSONResponse(status_code=402, content={"error": "payment_required", "payment_requirements": x402_service.payment_requirements()})
         async with db() as session:
             return await service(session).create_job(body, user)
 
     @router.get("/jobs/{job_id}")
-    async def get_job(job_id: int, user: dict[str, Any] = Depends(current_user)):
-        _ = user
+    async def get_job(job_id: int, _user: dict[str, Any] = Depends(current_user)):
         async with db() as session:
             return await service(session).job_detail(job_id)
 
     @router.get("/jobs/{job_id}/bids")
-    async def list_bids(job_id: int, user: dict[str, Any] = Depends(current_user)):
-        _ = user
+    async def list_bids(job_id: int, _user: dict[str, Any] = Depends(current_user)):
         async with db() as session:
             return await service(session).list_bids(job_id)
 
@@ -135,8 +120,7 @@ def create_jobs_router(
             return await service(session).award_job(job_id, body.bid_id, user)
 
     @router.post("/jobs/{job_id}/fund")
-    async def fund_job(job_id: int, body: dict[str, Any], user: dict[str, Any] = Depends(current_user)):
-        _ = body
+    async def fund_job(job_id: int, user: dict[str, Any] = Depends(current_user)):
         async with db() as session:
             return await service(session).fund_job(job_id, user)
 
@@ -146,8 +130,7 @@ def create_jobs_router(
             return await service(session).mark_ready(job_id, body.message, user)
 
     @router.post("/jobs/{job_id}/confirm")
-    async def confirm_job(job_id: int, body: dict[str, Any], user: dict[str, Any] = Depends(current_user)):
-        _ = body
+    async def confirm_job(job_id: int, user: dict[str, Any] = Depends(current_user)):
         async with db() as session:
             return await service(session).confirm_job(job_id, user)
 
@@ -157,8 +140,7 @@ def create_jobs_router(
             return await service(session).dispute_job(job_id, body.reason, user)
 
     @router.get("/jobs/{job_id}/messages")
-    async def list_messages(job_id: int, user: dict[str, Any] = Depends(current_user)):
-        _ = user
+    async def list_messages(job_id: int, _user: dict[str, Any] = Depends(current_user)):
         async with db() as session:
             return await service(session).list_messages(job_id)
 
@@ -193,20 +175,17 @@ def create_jobs_router(
         return {"photos": results}
 
     @router.get("/jobs/{job_id}/photos")
-    async def list_photos(job_id: int, user: dict[str, Any] = Depends(current_user)):
-        _ = user
+    async def list_photos(job_id: int, _user: dict[str, Any] = Depends(current_user)):
         async with db() as session:
             return await service(session).list_photos(job_id)
 
     @router.patch("/jobs/{job_id}/photos/{photo_id}")
-    async def patch_photo(job_id: int, photo_id: int, body: PhotoPatch, user: dict[str, Any] = Depends(current_user)):
-        _ = user
+    async def patch_photo(job_id: int, photo_id: int, body: PhotoPatch, _user: dict[str, Any] = Depends(current_user)):
         async with db() as session:
             return await service(session).patch_photo(job_id, photo_id, body)
 
     @router.get("/jobs/{job_id}/audit-events")
-    async def audit_events(job_id: int, user: dict[str, Any] = Depends(current_user)):
-        _ = user
+    async def audit_events(job_id: int, _user: dict[str, Any] = Depends(current_user)):
         async with db() as session:
             return await service(session).audit_events(job_id)
 

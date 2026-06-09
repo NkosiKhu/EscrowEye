@@ -2,15 +2,15 @@ from __future__ import annotations
 
 import base64
 import binascii
-import os
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, ed25519, utils
+from app.core.config import settings
 
 
 def signature_required() -> bool:
-    return os.getenv("ESCROWEYE_AUTH_REQUIRE_SIGNATURE", "false").lower() in {"1", "true", "yes", "on"}
+    return settings.AUTH_REQUIRE_SIGNATURE
 
 
 def challenge_message(nonce: str) -> str:

@@ -1,15 +1,14 @@
 from __future__ import annotations
 
-import os
 from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
-from pathlib import Path
 from typing import Any
 
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 
+from app.core.config import settings
 from app.core.logging import get_logger
 
 
@@ -24,19 +23,10 @@ _engine: Any = None
 _async_session_maker: async_sessionmaker[AsyncSession] | None = None
 
 
-def get_db_path() -> str:
-    env_db = os.getenv("ESCROWEYE_DATABASE_URL")
-    if env_db:
-        return env_db
-    base_dir = Path(__file__).resolve().parents[2]
-    db_path = base_dir / "escroweye.sqlite3"
-    return f"sqlite+aiosqlite:///{db_path}"
-
-
 def get_engine():
     global _engine
     if _engine is None:
-        db_url = get_db_path()
+        db_url = settings.database_url()
         logger.info("Creating async engine", extra={"url": db_url})
         _engine = create_async_engine(
             db_url,

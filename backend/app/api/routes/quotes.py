@@ -15,7 +15,7 @@ class QuoteIn(BaseModel):
     timeline: Optional[str] = None
 
 
-def create_quotes_router(*, db: Callable, now_iso: Callable[[], str], current_user: Callable) -> APIRouter:
+def create_quotes_router(*, db: Callable, current_user: Callable) -> APIRouter:
     router = APIRouter(prefix="/api", tags=["quotes"])
 
     @router.post("/service-requests/{request_id}/quotes", status_code=201)
@@ -24,8 +24,7 @@ def create_quotes_router(*, db: Callable, now_iso: Callable[[], str], current_us
             return await marketplace_service.create_quote(session, request_id, body, user)
 
     @router.get("/service-requests/{request_id}/quotes")
-    async def list_request_quotes(request_id: int, user: dict[str, Any] = Depends(current_user)):
-        _ = user
+    async def list_request_quotes(request_id: int, _user: dict[str, Any] = Depends(current_user)):
         async with db() as session:
             return await marketplace_service.list_request_quotes(session, request_id)
 

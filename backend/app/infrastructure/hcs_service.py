@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
-import os
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, Protocol
+
+from app.core.config import settings
 
 
 class HCSConfigurationError(RuntimeError):
@@ -47,22 +48,15 @@ class HieroHCSClient:
 
 
 class HCSService:
-    """HCS boundary.
-
-    The MVP records audit events locally and marks them as pending unless the
-    real Hedera environment and SDK wiring are available. This keeps the app
-    demoable while preserving the integration point.
-    """
-
     def __init__(self, client_factory: Callable[[str, str], HCSClient] | None = None) -> None:
-        self.operator_id = os.getenv("HEDERA_OPERATOR_ID")
-        self.operator_key = os.getenv("HEDERA_OPERATOR_KEY")
-        self.default_topic_id = os.getenv("HEDERA_HCS_TOPIC_ID")
+        self.operator_id = settings.HEDERA_OPERATOR_ID
+        self.operator_key = settings.HEDERA_OPERATOR_KEY
+        self.default_topic_id = settings.HEDERA_HCS_TOPIC_ID
         self._client_factory = client_factory or HieroHCSClient
 
     @property
     def require_real(self) -> bool:
-        return os.getenv("HEDERA_HCS_REQUIRE_REAL", "").lower() in {"1", "true", "yes", "on"}
+        return settings.HEDERA_HCS_REQUIRE_REAL
 
     def submit_event(self, event_type: str, payload: dict[str, Any], topic_id: str | None = None) -> HCSResult:
         target_topic = topic_id or self.default_topic_id

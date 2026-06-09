@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
 from app.infrastructure.models import Job, Photo, ProofUpload, Room
-from app.services import marketplace as marketplace_service
+from app.services._base import add_audit, mock_cid
 
 
 logger = get_logger("escroweye.proof")
@@ -28,7 +28,7 @@ class ProofService:
             select(func.coalesce(func.max(Photo.sequence), 0)).where(Photo.job_id == request_id)
         )
         seq = (seq_result.scalar() or 0) + 1
-        cid = marketplace_service.mock_cid(content, filename)
+        cid = mock_cid(content, filename)
         suffix = Path(filename or "proof.bin").suffix or ".bin"
         storage_path = self.upload_dir / f"request-{request_id}-proof-{seq}-{cid[:16]}{suffix}"
         storage_path.write_bytes(content)
@@ -75,7 +75,7 @@ class ProofService:
         if job is not None:
             job.status = "proof_uploaded"
             job.updated_at = now
-        await marketplace_service.add_local_audit(self.session, request_id, "proof_uploaded", {"count": count})
+        await add_audit(self.session, request_id, "proof_uploaded", {"count": count})
 
     async def list_proof(self, request_id: int) -> dict[str, Any]:
         result = await self.session.execute(

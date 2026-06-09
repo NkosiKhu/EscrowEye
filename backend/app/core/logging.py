@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import logging
-import os
 import sys
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
 
-from pythonjsonlogger import jsonlogger
+try:
+    from pythonjsonlogger.json import JsonFormatter
+except ImportError:
+    from pythonjsonlogger.jsonlogger import JsonFormatter as JsonFormatter  # noqa: F811
+from app.core.config import settings
 
 
 _LOG_DIR: Path | None = None
@@ -55,16 +58,15 @@ _request_context = RequestContextFilter()
 def configure_logging() -> None:
     global _LOG_DIR
 
-    level_name = os.getenv("ESCROWEYE_LOG_LEVEL", "DEBUG").upper()
+    level_name = settings.LOG_LEVEL
     level = getattr(logging, level_name, logging.DEBUG)
 
-    log_dir = os.getenv("ESCROWEYE_LOG_DIR", "")
+    log_dir = settings.LOG_DIR
     if log_dir:
         _LOG_DIR = Path(log_dir)
         _LOG_DIR.mkdir(parents=True, exist_ok=True)
 
-    json_format = os.getenv("ESCROWEYE_LOG_FORMAT", "text")
-    use_json = json_format.lower() in ("json", "structured")
+    use_json = settings.LOG_FORMAT.lower() in ("json", "structured")
 
     root = logging.getLogger()
     root.setLevel(level)
@@ -74,7 +76,7 @@ def configure_logging() -> None:
 
     fmt_string = "%(timestamp)s %(levelname)s [%(name)s] [%(request_id)s] [%(user_id)s] %(message)s"
     if use_json:
-        formatter = jsonlogger.JsonFormatter(
+        formatter = JsonFormatter(
             fmt="%(timestamp)s %(levelname)s %(name)s %(request_id)s %(user_id)s %(path)s %(message)s",
             rename_fields={"levelname": "severity", "name": "logger", "message": "message"},
         )
@@ -116,7 +118,7 @@ def configure_logging() -> None:
 
     get_logger("escroweye.initialized").info(
         "Logging configured",
-        extra={"log_level": level_name, "log_format": json_format, "log_dir": str(_LOG_DIR or "console-only")},
+        extra={"log_level": level_name, "log_format": settings.LOG_FORMAT, "log_dir": str(_LOG_DIR or "console-only")},
     )
 
 

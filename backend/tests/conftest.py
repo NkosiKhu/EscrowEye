@@ -7,6 +7,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from app import main
+from app.core.config import settings
 from app.infrastructure.database import create_tables, get_session, reset_engine
 
 
@@ -14,7 +15,7 @@ def make_client(tmp_path: Path) -> TestClient:
     """Create a TestClient with an isolated async SQLite database."""
     db_path = tmp_path / "escroweye-test.sqlite3"
     os.environ["ESCROWEYE_DATABASE_URL"] = f"sqlite+aiosqlite:///{db_path}"
-    main.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    settings.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
     reset_engine()
 

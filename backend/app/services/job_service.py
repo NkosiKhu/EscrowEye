@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import base64
-import hashlib
 import json
 import time
 import urllib.error
@@ -13,18 +12,10 @@ from fastapi import HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.infrastructure.models import Bid, Home, Job, Message, MessagePhoto, Photo, Room, User
-
-
-PAYMENT_REQUIREMENTS = {
-    "scheme": "exact",
-    "network": "hedera:testnet",
-    "amount": "10000000",
-    "asset": "0.0.0",
-    "payTo": "0.0.7162784",
-    "maxTimeoutSeconds": 180,
-    "extra": {"feePayer": "0.0.7162784"},
-}
+from app.services._base import audit_events as base_audit_events
+from app.services._base import get_job, get_user, mock_cid, now_iso
 
 
 class JobService:
@@ -49,24 +40,10 @@ class JobService:
         self.openrouter_api_key = openrouter_api_key
         self.openrouter_model = openrouter_model
 
-    async def _get_job(self, job_id: int) -> Job:
-        result = await self.session.execute(select(Job).where(Job.id == job_id))
-        job = result.scalar_one_or_none()
-        if job is None:
-            raise HTTPException(status_code=404, detail="not_found")
-        return job
-
-    async def _get_user(self, user_id: int) -> User:
-        result = await self.session.execute(select(User).where(User.id == user_id))
-        user = result.scalar_one_or_none()
-        if user is None:
-            raise HTTPException(status_code=404, detail="not_found")
-        return user
-
     async def job_summary(self, job: Job) -> dict[str, Any]:
         home_result = await self.session.execute(select(Home).where(Home.id == job.home_id))
         home = home_result.scalar_one_or_none()
-        owner = await self._get_user(job.owner_user_id)
+        owner = await get_user(self.session, job.owner_user_id)
         supplier = None
         if job.supplier_user_id is not None:
             supplier_result = await self.session.execute(select(User).where(User.id == job.supplier_user_id))
@@ -94,7 +71,7 @@ class JobService:
         }
 
     async def job_detail(self, job_id: int) -> dict[str, Any]:
-        job = await self._get_job(job_id)
+        job = await get_job(self.session, job_id)
         data = await self.job_summary(job)
         accepted = None
         if job.accepted_bid_id is not None:
@@ -112,7 +89,7 @@ class JobService:
         return data
 
     async def bid_payload(self, bid: Bid) -> dict[str, Any]:
-        supplier = await self._get_user(bid.supplier_user_id)
+        supplier = await get_user(self.session, bid.supplier_user_id)
         return {
             "id": bid.id,
             "supplier": {"id": supplier.id, "hedera_account_id": supplier.hedera_account_id},
@@ -122,7 +99,7 @@ class JobService:
             "created_at": bid.created_at,
         }
 
-    async def insert_message(self, job_id: int, sender_user_id: int | None, sender_type: str, body: str, photo_ids: list[int]) -> dict[str, Any]:
+    async def insert_message(self, job_id: int, sender_user_id: int | None, sender_type: str, body: str, photo_ids: list[int]) -> Message:
         msg = Message(
             job_id=job_id,
             sender_user_id=sender_user_id,
@@ -206,7 +183,7 @@ class JobService:
         return {"id": job.id, "status": "bidding", "creation_fee_paid": True, "hcs_topic_id": hcs_topic}
 
     async def list_bids(self, job_id: int) -> dict[str, Any]:
-        await self._get_job(job_id)
+        await get_job(self.session, job_id)
         result = await self.session.execute(
             select(Bid).where(Bid.job_id == job_id, Bid.status != "withdrawn").order_by(Bid.amount_tinybar)
         )
@@ -217,7 +194,7 @@ class JobService:
         return {"bids": results}
 
     async def create_bid(self, job_id: int, body: Any, user: dict[str, Any]) -> dict[str, Any]:
-        await self._get_job(job_id)
+        await get_job(self.session, job_id)
         now = self.now_iso()
         bid = Bid(
             job_id=job_id,
@@ -276,7 +253,7 @@ class JobService:
         job.accepted_bid_id = bid_id
         job.status = "awarded"
         job.updated_at = now
-        supplier = await self._get_user(bid.supplier_user_id)
+        supplier = await get_user(self.session, bid.supplier_user_id)
         return {"job_id": job_id, "status": "awarded", "supplier": self.public_user({"id": supplier.id, "email": supplier.email, "user_type": supplier.user_type, "hedera_account_id": supplier.hedera_account_id, "hedera_public_key": supplier.hedera_public_key})}
 
     async def fund_job(self, job_id: int, user: dict[str, Any]) -> dict[str, Any]:
@@ -320,7 +297,7 @@ class JobService:
         return {"job_id": job_id, "status": "completed", "tx_hash": tx_hash}
 
     async def dispute_job(self, job_id: int, reason: str, user: dict[str, Any]) -> dict[str, Any]:
-        await self._get_job(job_id)
+        await get_job(self.session, job_id)
         now = self.now_iso()
         job_result = await self.session.execute(select(Job).where(Job.id == job_id))
         job = job_result.scalar_one()
@@ -331,7 +308,7 @@ class JobService:
         return {"job_id": job_id, "status": "disputed"}
 
     async def list_messages(self, job_id: int) -> dict[str, Any]:
-        await self._get_job(job_id)
+        await get_job(self.session, job_id)
         result = await self.session.execute(select(Message).where(Message.job_id == job_id).order_by(Message.id))
         rows = result.scalars().all()
         results = []
@@ -340,7 +317,7 @@ class JobService:
         return {"messages": results}
 
     async def create_message(self, job_id: int, body: str, photo_ids: list[int], user: dict[str, Any]) -> dict[str, Any]:
-        await self._get_job(job_id)
+        await get_job(self.session, job_id)
         msg = await self.insert_message(job_id, user["id"], "human", body, photo_ids)
         if photo_ids:
             await self.review_photos(job_id, photo_ids)
@@ -353,12 +330,8 @@ class JobService:
             "created_at": msg.created_at,
         }
 
-    def mock_cid(self, content: bytes, filename: str) -> str:
-        digest = hashlib.sha256(filename.encode() + b":" + content).hexdigest()
-        return "bafy" + digest[:45]
-
     async def create_photo_record(self, job_id: int, room_id: int | None, user_id: int, content: bytes, filename: str, content_type: str | None, encrypted_keys: str | None) -> dict[str, Any]:
-        await self._get_job(job_id)
+        await get_job(self.session, job_id)
         if room_id is not None:
             room_result = await self.session.execute(select(Room).where(Room.id == room_id))
             if room_result.scalar_one_or_none() is None:
@@ -367,7 +340,7 @@ class JobService:
             select(func.coalesce(func.max(Photo.sequence), 0)).where(Photo.job_id == job_id)
         )
         seq = (seq_result.scalar() or 0) + 1
-        cid = self.mock_cid(content, filename)
+        cid = mock_cid(content, filename)
         suffix = Path(filename or "photo.bin").suffix or ".bin"
         storage_path = self.upload_dir / f"job-{job_id}-photo-{seq}-{cid[:16]}{suffix}"
         storage_path.write_bytes(content)
@@ -399,7 +372,7 @@ class JobService:
             room_result = await self.session.execute(select(Room).where(Room.id == photo.room_id))
             room_row = room_result.scalar_one_or_none()
             room = {"id": room_row.id, "name": room_row.name} if room_row else None
-        uploaded_by = await self._get_user(photo.uploaded_by_user_id)
+        uploaded_by = await get_user(self.session, photo.uploaded_by_user_id)
         return {
             "id": photo.id,
             "cid": photo.cid,
@@ -412,7 +385,7 @@ class JobService:
         }
 
     async def list_photos(self, job_id: int) -> dict[str, Any]:
-        await self._get_job(job_id)
+        await get_job(self.session, job_id)
         result = await self.session.execute(select(Photo).where(Photo.job_id == job_id).order_by(Photo.sequence))
         rows = result.scalars().all()
         results = []
@@ -450,25 +423,7 @@ class JobService:
         }
 
     async def audit_events(self, job_id: int) -> dict[str, Any]:
-        job = await self._get_job(job_id)
-        from app.infrastructure.models import AuditEvent
-        result = await self.session.execute(
-            select(AuditEvent).where(AuditEvent.job_id == job_id).order_by(AuditEvent.sequence_number)
-        )
-        rows = result.scalars().all()
-        events = []
-        for row in rows:
-            item = {
-                "type": row.type,
-                "job_id": row.job_id,
-                "tx_hash": row.tx_hash,
-                "sequence_number": row.sequence_number,
-                "consensus_timestamp": row.consensus_timestamp,
-            }
-            if item["tx_hash"] is None:
-                del item["tx_hash"]
-            events.append(item)
-        return {"hcs_topic_id": job.hcs_topic_id, "events": events}
+        return await base_audit_events(self.session, job_id)
 
     async def review_photos(self, job_id: int, photo_ids: list[int]) -> None:
         rooms_result = await self.session.execute(
