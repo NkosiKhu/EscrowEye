@@ -1,0 +1,11 @@
+{
+  "name": "escroweye-hedera-dev-tools",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "bootstrap-wallets": "node bootstrap-wallets.mjs"
+  },
+  "dependencies": {
+    "@hashgraph/sdk": "^2.72.0"
+  }
+}

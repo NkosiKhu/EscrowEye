@@ -1,0 +1,26 @@
+escroweye.app {
+    tls {
+        on_demand
+    }
+
+    header {
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        X-XSS-Protection "1; mode=block"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        Content-Security-Policy "default-src 'self'; img-src 'self' data:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self' https://testnet.mirrornode.hedera.com;"
+        -Server
+    }
+
+    handle /api/* {
+        reverse_proxy backend:8000
+    }
+
+    handle /health* {
+        reverse_proxy backend:8000
+    }
+
+    handle {
+        reverse_proxy frontend:80
+    }
+}
