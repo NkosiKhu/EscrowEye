@@ -7,6 +7,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, File, Form, UploadFile
 from pydantic import BaseModel, Field
 
+from app.services import marketplace as marketplace_service
 from app.services.proof_service import ProofService
 
 
@@ -53,6 +54,8 @@ def create_proof_router(
                     )
                 )
             await proof_service.mark_uploaded(request_id, len(results))
+            # Auto-run AI validation so the owner can confirm without a manual step
+            await marketplace_service.run_ai_validation(session, request_id)
         return {"proof": results}
 
     @router.get("/service-requests/{request_id}/proof")

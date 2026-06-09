@@ -40,6 +40,8 @@ export function useWorkspaceData({
   const [workspace, setWorkspace] = useState<WorkspaceData>(emptyWorkspace);
   const [loading, setLoading] = useState(false);
   const [activeWorker, setActiveWorker] = useState(workers[0]);
+  const [earnings, setEarnings] = useState<{ pending_earnings: number; past_earnings: number; total_earnings: number } | null>(null);
+  const [supplierTxs, setSupplierTxs] = useState<Array<{ id: number; type: string; amount: number; token: string; status: string; hedera_tx_id: string | null; created_at: string }>>([]);
 
   const ownerJobs = useMemo(() => jobs.filter((job) => user && job.owner.id === user.id), [jobs, user]);
   const assignedJobs = useMemo(() => jobs.filter((job) => user && job.supplier?.id === user.id), [jobs, user]);
@@ -70,6 +72,9 @@ export function useWorkspaceData({
       const nextJobs = [...active.jobs, ...offers.jobs, ...archived.jobs];
       setJobs(nextJobs);
       setSelectedJobId((current) => current ?? nextJobs[0]?.id ?? null);
+      // Fetch earnings data for the supplier earnings panel
+      api.supplierEarnings().then(setEarnings).catch(() => null);
+      api.supplierTransactions().then((res) => setSupplierTxs(res.transactions)).catch(() => null);
       return;
     }
     const result = await api.ownerRequests();
@@ -130,6 +135,8 @@ export function useWorkspaceData({
     setSupplierArchived([]);
     setWorkspace(emptyWorkspace);
     setSelectedJobId(null);
+    setEarnings(null);
+    setSupplierTxs([]);
   }, []);
 
   useEffect(() => {
@@ -156,6 +163,7 @@ export function useWorkspaceData({
     activeWorker,
     archivedSupplierJobs,
     categories,
+    earnings,
     ensureHomeForRequest,
     loadJobWorkspace,
     loadJobs,
@@ -167,6 +175,7 @@ export function useWorkspaceData({
     selectedJobId,
     setActiveWorker,
     setSelectedJobId,
+    supplierTxs,
     workerResults,
     workspace,
   };

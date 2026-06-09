@@ -69,7 +69,9 @@ function App() {
       workspaceData.setSelectedJobId(result.id);
     } catch (error) {
       if (error instanceof ApiError && error.status === 402 && error.body && typeof error.body === "object") {
-        const requirements = (error.body as { payment_requirements?: PaymentRequirements }).payment_requirements;
+        const body = error.body as Record<string, unknown>;
+        const detail = body.detail as Record<string, unknown> | undefined;
+        const requirements = (detail?.payment_requirements ?? body.payment_requirements) as PaymentRequirements | undefined;
         if (requirements) {
           setPendingPayment({ payload, requirements });
           setNotice("x402 payment required. Replay the paid request to create this service request.");
@@ -326,6 +328,8 @@ function SupplierWorkspace({
       marketJobs={workspaceData.marketJobs}
       activeJobs={workspaceData.activeSupplierJobs}
       archivedJobs={workspaceData.archivedSupplierJobs}
+      earnings={workspaceData.earnings}
+      supplierTxs={workspaceData.supplierTxs}
       selectedJob={workspaceData.workspace.job}
       bids={workspaceData.workspace.bids}
       photos={workspaceData.workspace.photos}

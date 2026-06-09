@@ -215,6 +215,8 @@ function SupplierDesktop({
   marketJobs,
   activeJobs,
   archivedJobs,
+  earnings,
+  supplierTxs,
   selectedJob,
   bids,
   photos,
@@ -234,6 +236,8 @@ function SupplierDesktop({
   marketJobs: JobSummary[];
   activeJobs: JobSummary[];
   archivedJobs: JobSummary[];
+  earnings: { pending_earnings: number; past_earnings: number; total_earnings: number } | null;
+  supplierTxs: Array<{ id: number; type: string; amount: number; token: string; status: string; hedera_tx_id: string | null; created_at: string }>;
   selectedJob: JobDetail | null;
   bids: Bid[];
   photos: Photo[];
@@ -248,7 +252,7 @@ function SupplierDesktop({
 }) {
   if (view === "messages") return <MessagesPanel messages={messages.length ? messages.map((message) => message.body) : ["Quote cards, proof updates, and owner confirmation prompts appear here."]} />;
   if (view === "profile") return <ProfilePanel profile={profile} role="Supplier" />;
-  if (view === "earnings") return <EarningsPanel activeJobs={activeJobs} archivedJobs={archivedJobs} />;
+  if (view === "earnings") return <EarningsPanel activeJobs={activeJobs} archivedJobs={archivedJobs} earnings={earnings} supplierTxs={supplierTxs} />;
 
   return (
     <section className="supplier-grid">
@@ -447,12 +451,17 @@ function OwnerRequests({
 
             <AiValidation photos={photos} auditEvents={auditEvents} />
 
-            {/* Run AI validation — visible once proof has been uploaded */}
-            {selectedJob.status === "proof_uploaded" && onRunAiValidation && (
-              <button className="primary-button" onClick={onRunAiValidation}>
-                Run AI validation
-              </button>
-            )}
+            {/* Run AI validation — visible once proof has been uploaded, or as a
+                fallback when the job is awaiting owner confirmation but validation
+                has not yet passed (e.g. if auto-validation was skipped). */}
+            {(selectedJob.status === "proof_uploaded" ||
+              (selectedJob.status === "awaiting_owner_confirmation" &&
+                !photos.some((p) => p.review_status === "passed"))) &&
+              onRunAiValidation && (
+                <button className="primary-button" onClick={onRunAiValidation}>
+                  Run AI validation
+                </button>
+              )}
 
             {/* Confirm satisfaction — visible when AI has passed */}
             {selectedJob.status === "awaiting_owner_confirmation" && (
@@ -614,22 +623,43 @@ function SendQuoteModal({ state, setState, onSendQuote }: { state: NonNullable<Q
   );
 }
 
-function EarningsPanel({ activeJobs, archivedJobs }: { activeJobs: JobSummary[]; archivedJobs: JobSummary[] }) {
+function EarningsPanel({
+  activeJobs,
+  archivedJobs,
+  earnings,
+  supplierTxs,
+}: {
+  activeJobs: JobSummary[];
+  archivedJobs: JobSummary[];
+  earnings: { pending_earnings: number; past_earnings: number; total_earnings: number } | null;
+  supplierTxs: Array<{ id: number; type: string; amount: number; token: string; status: string; hedera_tx_id: string | null; created_at: string }>;
+}) {
+  const totalHbar = earnings ? tinybarToHbar(earnings.total_earnings) : null;
   return (
     <section className="split-grid">
       <div className="hero-panel earnings">
         <p className="eyebrow light">Supplier earnings</p>
-        <h2>₦570,000</h2>
+        <h2>{totalHbar !== null ? `${totalHbar} HBAR` : "Loading…"}</h2>
         <p>{activeJobs.length} pending jobs · {archivedJobs.length} paid jobs</p>
+        {earnings && (
+          <p className="muted">
+            {tinybarToHbar(earnings.pending_earnings)} HBAR pending · {tinybarToHbar(earnings.past_earnings)} HBAR paid
+          </p>
+        )}
       </div>
       <div className="panel">
         <PanelHead title="Transaction history" />
-        {["Escrow release", "HBAR payout", "Base fee audit", "Pending escrow"].map((item, index) => (
-          <div className="transaction-row" key={item}>
-            <span>{item}<small>Hedera transaction #{index + 1}</small></span>
-            <b>{index === 3 ? "Pending" : "Paid"}</b>
+        {supplierTxs.length > 0 ? supplierTxs.map((tx) => (
+          <div className="transaction-row" key={tx.id}>
+            <span>
+              {tx.type.replace(/_/g, " ")}
+              {tx.hedera_tx_id && <small>{tx.hedera_tx_id}</small>}
+            </span>
+            <b>{tx.status === "settled" ? "Paid" : tx.status}</b>
           </div>
-        ))}
+        )) : (
+          <p className="muted">No transactions yet.</p>
+        )}
       </div>
     </section>
   );

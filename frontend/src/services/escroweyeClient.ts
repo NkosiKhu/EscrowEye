@@ -106,5 +106,11 @@ export function createEscrowEyeClient(token: string | null) {
         method: "POST",
         body: JSON.stringify({ transaction_id: transactionId ?? null }),
       }),
+
+    supplierEarnings: () =>
+      request<{ pending_earnings: number; past_earnings: number; total_earnings: number }>("/api/supplier/earnings"),
+
+    supplierTransactions: () =>
+      request<{ transactions: Array<{ id: number; type: string; amount: number; token: string; status: string; hedera_tx_id: string | null; created_at: string }> }>("/api/supplier/transactions"),
   };
 }
