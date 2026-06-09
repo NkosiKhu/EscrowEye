@@ -6,8 +6,12 @@ from typing import Any
 
 from fastapi import HTTPException
 
+from app.core.logging import get_logger
 from app.domain.enums import AIValidationStatus, EscrowStatus, JobStatus
 from app.infrastructure.hcs_service import HCSService
+
+
+logger = get_logger("escroweye.marketplace")
 
 
 SERVICE_CATEGORIES = [
@@ -92,6 +96,7 @@ def set_user_role(conn: sqlite3.Connection, user: dict[str, Any], role: str) -> 
     if role not in {"owner", "supplier"}:
         raise HTTPException(status_code=422, detail="invalid_role")
     conn.execute("UPDATE users SET user_type = ? WHERE id = ?", (role, user["id"]))
+    logger.info("user.role_updated user_id=%s wallet=%s role=%s", user["id"], user["hedera_account_id"], role)
     return {"role": role}
 
 
@@ -257,6 +262,7 @@ def pay_base_fee(conn: sqlite3.Connection, request_id: int, user: dict[str, Any]
     fee = base_fee_for(bid["amount_tinybar"])
     record_transaction(conn, request_id, "base_fee", fee, "HBAR", "settled", f"local:base-fee:{request_id}")
     add_local_audit(conn, request_id, "base_fee_paid", {"amount": fee})
+    logger.info("escrow.base_fee_paid request_id=%s owner_wallet=%s amount=%s", request_id, user["hedera_account_id"], fee)
     return {"request_id": request_id, "status": "base_fee_paid", "amount": fee}
 
 
@@ -379,6 +385,7 @@ def add_local_audit(conn: sqlite3.Connection, job_id: int, event_type: str, payl
         """,
         (job_id, event_type, hcs_result.tx_id, seq, hcs_result.status, str(event_payload)),
     )
+    logger.info("audit.recorded job_id=%s event=%s hcs_status=%s tx_id=%s", job_id, event_type, hcs_result.status, hcs_result.tx_id)
 
 
 def create_request(conn: sqlite3.Connection, body: Any, user: dict[str, Any]) -> dict[str, Any]:
@@ -411,6 +418,7 @@ def create_request(conn: sqlite3.Connection, body: Any, user: dict[str, Any]) ->
         ),
     )
     add_local_audit(conn, job_cur.lastrowid, "service_request_created", {"category": body.category})
+    logger.info("service_request.created request_id=%s owner_wallet=%s category=%s budget=%s", job_cur.lastrowid, user["hedera_account_id"], body.category, body.budget_amount)
     return {"id": job_cur.lastrowid, "status": JobStatus.QUOTE_REQUESTED, "hcs_topic_id": hcs_topic}
 
 
@@ -441,6 +449,7 @@ def create_quote(conn: sqlite3.Connection, request_id: int, body: Any, user: dic
     )
     conn.execute("UPDATE jobs SET status = ?, updated_at = ? WHERE id = ?", (JobStatus.QUOTE_RECEIVED, now, request_id))
     add_local_audit(conn, request_id, "quote_submitted", {"amount": body.amount})
+    logger.info("quote.created request_id=%s quote_id=%s supplier_wallet=%s amount=%s", request_id, cur.lastrowid, user["hedera_account_id"], body.amount)
     return quote_payload(conn, conn.execute("SELECT * FROM bids WHERE id = ?", (cur.lastrowid,)).fetchone())
 
 
@@ -458,6 +467,7 @@ def accept_quote(conn: sqlite3.Connection, quote_id: int, user: dict[str, Any]) 
         (bid["supplier_user_id"], quote_id, JobStatus.QUOTE_ACCEPTED, now, bid["job_id"]),
     )
     add_local_audit(conn, bid["job_id"], "quote_accepted", {"quote_id": quote_id})
+    logger.info("quote.accepted request_id=%s quote_id=%s owner_wallet=%s amount=%s", bid["job_id"], quote_id, user["hedera_account_id"], bid["amount_tinybar"])
     return {
         "request_id": bid["job_id"],
         "quote_id": quote_id,
@@ -482,6 +492,7 @@ def fund_escrow(conn: sqlite3.Connection, request_id: int, user: dict[str, Any])
     conn.execute("UPDATE jobs SET status = ?, escrow_account_id = ?, updated_at = ? WHERE id = ?", (JobStatus.ESCROW_FUNDED, escrow, now, request_id))
     record_transaction(conn, request_id, "escrow_fund", bid["amount_tinybar"], "HBAR", "settled", f"local:escrow:{request_id}")
     add_local_audit(conn, request_id, "escrow_funded", {"amount": bid["amount_tinybar"]})
+    logger.info("escrow.funded request_id=%s owner_wallet=%s amount=%s escrow=%s", request_id, user["hedera_account_id"], bid["amount_tinybar"], escrow)
     return {"request_id": request_id, "status": JobStatus.ESCROW_FUNDED, "escrow_status": EscrowStatus.ESCROW_FUNDED, "escrow_account_id": escrow}
 
 
@@ -519,6 +530,7 @@ def run_ai_validation(conn: sqlite3.Connection, request_id: int) -> dict[str, An
         (request_id, status, confidence, "" if photos else "No proof uploaded", status, now),
     )
     add_local_audit(conn, request_id, "ai_validation_completed", {"status": status})
+    logger.info("ai.validation_completed request_id=%s status=%s confidence=%s", request_id, status, confidence)
     return {"request_id": request_id, "status": status, "confidence_score": confidence}
 
 
@@ -549,6 +561,7 @@ def release_payment(conn: sqlite3.Connection, request_id: int, user: dict[str, A
     tx_id = f"local:release:{request_id}"
     record_transaction(conn, request_id, "release", amount, "HBAR", "settled", tx_id)
     add_local_audit(conn, request_id, "payment_released", {"tx_id": tx_id})
+    logger.info("escrow.payment_released request_id=%s owner_wallet=%s amount=%s tx_id=%s", request_id, user["hedera_account_id"], amount, tx_id)
     return {"request_id": request_id, "status": JobStatus.COMPLETED, "escrow_status": EscrowStatus.RELEASED, "hedera_tx_id": tx_id}
 
 

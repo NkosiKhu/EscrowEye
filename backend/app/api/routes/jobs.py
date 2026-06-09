@@ -7,7 +7,8 @@ from fastapi import APIRouter, Depends, File, Form, Header, Request, UploadFile
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 
-from app.services.job_service import JobService, PAYMENT_REQUIREMENTS
+from app.infrastructure.x402_service import X402ConfigurationError
+from app.services.job_service import JobService
 
 
 class JobIn(BaseModel):
@@ -59,6 +60,7 @@ def create_jobs_router(
     upload_dir: Path,
     openrouter_api_key: str | None,
     openrouter_model: str,
+    x402_service: Any,
 ) -> APIRouter:
     router = APIRouter(prefix="/api", tags=["jobs"])
 
@@ -88,8 +90,16 @@ def create_jobs_router(
         x_402_payment: str | None = Header(default=None),
         user: dict[str, Any] = Depends(current_user),
     ):
-        if not (x_payment or x_402_payment or request.headers.get("Payment")):
-            return JSONResponse(status_code=402, content={"error": "payment_required", "payment_requirements": PAYMENT_REQUIREMENTS})
+        _ = x_payment, x_402_payment
+        try:
+            payment = x402_service.authorize_headers(dict(request.headers))
+        except X402ConfigurationError as error:
+            return JSONResponse(
+                status_code=402,
+                content={"error": "payment_verification_required", "detail": str(error), "payment_requirements": x402_service.payment_requirements()},
+            )
+        if not payment.get("valid"):
+            return JSONResponse(status_code=402, content={"error": "payment_required", "payment_requirements": x402_service.payment_requirements()})
         with db() as conn:
             return service(conn).create_job(body, user)
 

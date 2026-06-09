@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, Header, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from app.infrastructure.x402_service import X402ConfigurationError
 from app.services import marketplace as marketplace_service
 from app.services.demo_seed import seed_demo_data
 
@@ -64,7 +65,15 @@ def create_service_requests_router(
         x_402_payment: str | None = Header(default=None),
         user: dict[str, Any] = Depends(current_user),
     ):
-        if not (x_payment or x_402_payment or request.headers.get("Payment")):
+        _ = x_payment, x_402_payment
+        try:
+            payment = x402_service.authorize_headers(dict(request.headers))
+        except X402ConfigurationError as error:
+            return JSONResponse(
+                status_code=402,
+                content={"error": "payment_verification_required", "detail": str(error), "payment_requirements": x402_service.payment_requirements()},
+            )
+        if not payment.get("valid"):
             return JSONResponse(status_code=402, content={"error": "payment_required", "payment_requirements": x402_service.payment_requirements()})
         with db() as conn:
             return marketplace_service.create_request(conn, body, user)

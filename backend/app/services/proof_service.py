@@ -4,7 +4,11 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Callable
 
+from app.core.logging import get_logger
 from app.services import marketplace as marketplace_service
+
+
+logger = get_logger("escroweye.proof")
 
 
 class ProofService:
@@ -49,6 +53,7 @@ class ProofService:
                 self.now_iso(),
             ),
         )
+        logger.info("proof.uploaded request_id=%s photo_id=%s user_id=%s cid=%s content_type=%s", request_id, cur.lastrowid, user_id, cid, content_type)
         return {"id": cur.lastrowid, "cid": cid, "sequence": seq, "validation_status": "pending"}
 
     def mark_uploaded(self, request_id: int, count: int) -> None:

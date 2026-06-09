@@ -6,12 +6,14 @@ import os
 import secrets
 import sqlite3
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.api.routes.ai_validation import create_ai_validation_router
 from app.api.routes.audit import create_audit_router
@@ -25,6 +27,7 @@ from app.api.routes.quotes import create_quotes_router
 from app.api.routes.service_requests import create_service_requests_router
 from app.api.routes.workers import router as workers_router
 from app.api.routes.x402 import router as x402_router
+from app.core.logging import configure_logging, get_logger
 from app.infrastructure.x402_service import X402Service
 from app.services import marketplace as marketplace_service
 
@@ -51,12 +54,40 @@ def load_local_creds() -> None:
 
 
 load_local_creds()
+configure_logging()
+logger = get_logger("escroweye.main")
 SECRET = os.getenv("ESCROWEYE_SECRET", "escroweye-dev-secret").encode()
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openai/gpt-4o")
 x402_service = X402Service()
 
 app = FastAPI(title="EscrowEye API", version="0.1.0")
+
+
+class RequestLoggingMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        request_id = request.headers.get("X-Request-ID", str(uuid.uuid4()))
+        start = time.perf_counter()
+        logger.info("request.start id=%s method=%s path=%s", request_id, request.method, request.url.path)
+        try:
+            response = await call_next(request)
+        except Exception:
+            logger.exception("request.error id=%s method=%s path=%s", request_id, request.method, request.url.path)
+            raise
+        duration_ms = round((time.perf_counter() - start) * 1000, 2)
+        response.headers["X-Request-ID"] = request_id
+        logger.info(
+            "request.finish id=%s method=%s path=%s status=%s duration_ms=%s",
+            request_id,
+            request.method,
+            request.url.path,
+            response.status_code,
+            duration_ms,
+        )
+        return response
+
+
+app.add_middleware(RequestLoggingMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -114,7 +145,9 @@ def current_user(authorization: str = Header(default="")) -> dict[str, Any]:
         raise HTTPException(status_code=401, detail="missing_bearer_token")
     user_id = verify_token(authorization.removeprefix("Bearer ").strip())
     with db() as conn:
-        return dict(one(conn, "SELECT * FROM users WHERE id = ?", (user_id,)))
+        user = dict(one(conn, "SELECT * FROM users WHERE id = ?", (user_id,)))
+        logger.debug("auth.current_user user_id=%s wallet=%s role=%s", user["id"], user["hedera_account_id"], user["user_type"])
+        return user
 
 
 def public_user(row: sqlite3.Row | dict[str, Any] | None) -> dict[str, Any] | None:
@@ -332,6 +365,7 @@ def init_db() -> None:
 @app.on_event("startup")
 def startup() -> None:
     init_db()
+    logger.info("app.startup db_path=%s upload_dir=%s", DB_PATH, UPLOAD_DIR)
 
 
 @app.get("/")
@@ -357,6 +391,7 @@ app.include_router(
         upload_dir=UPLOAD_DIR,
         openrouter_api_key=OPENROUTER_API_KEY,
         openrouter_model=OPENROUTER_MODEL,
+        x402_service=x402_service,
     )
 )
 app.include_router(

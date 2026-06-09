@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ApiError, apiRequest } from "./api";
 import { asArray, formatDate, hbarToTinybar, statusLabel, tinybarToHbar, truncateMiddle } from "./format";
 import type { ApiUser, AuditEvent, Bid, Home, JobDetail, JobStatus, JobSummary, Message, PaymentRequirements, Photo, ServiceCategory, UserType, WorkerResult } from "./types";
+import { signWalletChallenge } from "./wallet";
 import "./styles.css";
 
 type Profile = {
@@ -19,7 +20,6 @@ type JobTab = "offers" | "active" | "archived";
 type RequestStep = "need" | "schedule" | "budget" | "summary" | "sent";
 type QuoteState = { job: JobSummary; amount: string } | null;
 type PendingServicePayment = { payload: ServiceRequestPayload; requirements: PaymentRequirements };
-
 type WorkerProfile = {
   id: number;
   name: string;
@@ -295,16 +295,17 @@ function App() {
   async function handleLogin(form: { userType: UserType; accountId: string; publicKey: string; profile: Profile }) {
     setLoading(true);
     try {
-      const challenge = await api<{ nonce: string }>("/api/auth/challenge", {
+      const challenge = await api<{ nonce: string; message: string }>("/api/auth/challenge", {
         method: "POST",
         body: JSON.stringify({ hedera_account_id: form.accountId }),
       });
+      const signedChallenge = await signWalletChallenge(challenge.message, `mock_signature_for_${challenge.nonce}`);
       const login = await api<{ token: string; user: ApiUser }>("/api/auth/login", {
         method: "POST",
         body: JSON.stringify({
-          hedera_account_id: form.accountId,
-          hedera_public_key: form.publicKey,
-          signature: `mock_signature_for_${challenge.nonce}`,
+          hedera_account_id: signedChallenge.accountId ?? form.accountId,
+          hedera_public_key: signedChallenge.publicKey ?? form.publicKey,
+          signature: signedChallenge.signature,
           nonce: challenge.nonce,
           user_type: form.userType,
         }),
@@ -478,7 +479,7 @@ function App() {
               workspace.job
                 ? mutateJob(async () => {
                     const form = new FormData();
-                    files.forEach((file) => form.append("photos", file));
+                    files.forEach((file) => form.append("files", file));
                     if (roomId) form.append("room_id", String(roomId));
                     form.append("encrypted_keys", JSON.stringify({ mode: "mvp_mock", count: files.length }));
                     await api(`/api/service-requests/${workspace.job!.id}/proof`, { method: "POST", body: form });

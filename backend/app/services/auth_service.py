@@ -4,6 +4,14 @@ import secrets
 import sqlite3
 from typing import Any, Callable
 
+from fastapi import HTTPException
+
+from app.core.logging import get_logger
+from app.services.signature_verifier import challenge_message, signature_required, verify_wallet_signature
+
+
+logger = get_logger("escroweye.auth")
+
 
 class AuthService:
     def __init__(self, conn: sqlite3.Connection, *, one: Callable, now_iso: Callable[[], str], token_for: Callable[[int], str], public_user: Callable):
@@ -19,7 +27,8 @@ class AuthService:
             "INSERT INTO challenges (nonce, hedera_account_id, created_at) VALUES (?, ?, ?)",
             (nonce, hedera_account_id, self.now_iso()),
         )
-        return {"nonce": nonce, "message": f"Sign this message to login to EscrowEye: {nonce}"}
+        logger.info("auth.challenge wallet=%s", hedera_account_id)
+        return {"nonce": nonce, "message": challenge_message(nonce)}
 
     def login(self, body: Any) -> dict[str, Any]:
         challenge_row = self.one(
@@ -27,7 +36,18 @@ class AuthService:
             "SELECT * FROM challenges WHERE nonce = ? AND hedera_account_id = ?",
             (body.nonce, body.hedera_account_id),
         )
-        _ = challenge_row, body.signature
+        message = challenge_message(body.nonce)
+        if signature_required():
+            try:
+                verified = verify_wallet_signature(body.hedera_public_key, body.signature, message)
+            except ValueError:
+                verified = False
+            if not verified:
+                logger.warning("auth.signature_failed wallet=%s", body.hedera_account_id)
+                raise HTTPException(status_code=401, detail="invalid_wallet_signature")
+        else:
+            logger.debug("auth.signature_dev_mode wallet=%s", body.hedera_account_id)
+        _ = challenge_row
         existing = self.conn.execute("SELECT * FROM users WHERE hedera_account_id = ?", (body.hedera_account_id,)).fetchone()
         if existing:
             self.conn.execute(
@@ -45,6 +65,7 @@ class AuthService:
             )
             user = self.one(self.conn, "SELECT * FROM users WHERE id = ?", (cur.lastrowid,))
         self.conn.execute("DELETE FROM challenges WHERE nonce = ?", (body.nonce,))
+        logger.info("auth.login user_id=%s wallet=%s role=%s", user["id"], user["hedera_account_id"], user["user_type"])
         return {"token": self.token_for(user["id"]), "user": self.public_user(user)}
 
     def update_profile_email(self, email: str | None, user: dict[str, Any]) -> dict[str, Any]:
