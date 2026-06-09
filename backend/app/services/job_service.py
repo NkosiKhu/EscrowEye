@@ -327,7 +327,7 @@ class JobService:
         escrow_svc = EscrowService()
 
         if transaction_id:
-            confirmed = escrow_svc.poll_balance(escrow_id, bid.amount_tinybar, 30)
+            confirmed = await escrow_svc.poll_balance(escrow_id, bid.amount_tinybar, 30)
             if confirmed:
                 now = self.now_iso()
                 tx = EscrowTransaction(

@@ -56,10 +56,25 @@ export function createEscrowEyeClient(token: string | null) {
 
     seedDemo: () => request<{ job_id: number }>("/api/demo/seed", { method: "POST" }),
 
+    acceptQuote: (quoteId: number) =>
+      request(`/api/quotes/${quoteId}/accept`, {
+        method: "POST",
+      }),
+
     confirmSatisfaction: (jobId: number, payload: { signature: string; message: string }) =>
       request(`/api/service-requests/${jobId}/confirm-satisfaction`, {
         method: "POST",
         body: JSON.stringify(payload),
+      }),
+
+    runAiValidation: (jobId: number) =>
+      request(`/api/service-requests/${jobId}/ai-validation/run`, {
+        method: "POST",
+      }),
+
+    releasePayment: (jobId: number) =>
+      request(`/api/service-requests/${jobId}/release-payment`, {
+        method: "POST",
       }),
 
     dispute: (jobId: number, reason: string) =>
@@ -84,6 +99,12 @@ export function createEscrowEyeClient(token: string | null) {
       request(`/api/service-requests/${jobId}/proof`, {
         method: "POST",
         body: form,
+      }),
+
+    fundEscrow: (jobId: number, transactionId?: string) =>
+      request(`/api/service-requests/${jobId}/fund-escrow`, {
+        method: "POST",
+        body: JSON.stringify({ transaction_id: transactionId ?? null }),
       }),
   };
 }

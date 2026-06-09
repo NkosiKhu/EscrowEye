@@ -7,8 +7,10 @@ from fastapi import HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.logging import get_logger
 from app.domain.enums import AIValidationStatus, EscrowStatus, JobStatus
+from app.services.escrow import EscrowService
 from app.infrastructure.models import (
     AIValidation,
     Bid,
@@ -499,6 +501,18 @@ async def accept_quote(session: AsyncSession, quote_id: int, user: dict[str, Any
     job.accepted_bid_id = quote_id
     job.status = JobStatus.QUOTE_ACCEPTED
     job.updated_at = now
+    if settings.hedera_is_real:
+        supplier_result = await session.execute(select(User).where(User.id == bid.supplier_user_id))
+        supplier = supplier_result.scalar_one()
+        escrow_svc = EscrowService()
+        escrow_id = escrow_svc.create_escrow_account_with_public_keys(
+            supplier.hedera_public_key or ""
+        )
+        job.escrow_account_id = escrow_id
+        logger.info(
+            "escrow.account_created request_id=%s escrow_id=%s",
+            bid.job_id, escrow_id,
+        )
     await add_audit(session, bid.job_id, "quote_accepted", {"quote_id": quote_id})
     logger.info("quote.accepted request_id=%s quote_id=%s owner_wallet=%s amount=%s", bid.job_id, quote_id, user["hedera_account_id"], bid.amount_tinybar)
     return {
@@ -508,10 +522,16 @@ async def accept_quote(session: AsyncSession, quote_id: int, user: dict[str, Any
         "quote_amount": bid.amount_tinybar,
         "base_commitment_fee": base_fee_for(bid.amount_tinybar),
         "escrow_status": EscrowStatus.BASE_FEE_REQUIRED,
+        "escrow_account_id": job.escrow_account_id,
     }
 
 
-async def fund_escrow(session: AsyncSession, request_id: int, user: dict[str, Any]) -> dict[str, Any]:
+async def fund_escrow(
+    session: AsyncSession,
+    request_id: int,
+    user: dict[str, Any],
+    transaction_id: str | None = None,
+) -> dict[str, Any]:
     job_result = await session.execute(select(Job).where(Job.id == request_id))
     job = job_result.scalar_one_or_none()
     if job is None:
@@ -522,14 +542,54 @@ async def fund_escrow(session: AsyncSession, request_id: int, user: dict[str, An
         raise HTTPException(status_code=409, detail="quote_not_accepted")
     bid_result = await session.execute(select(Bid).where(Bid.id == job.accepted_bid_id))
     bid = bid_result.scalar_one()
-    escrow = f"0.0.{99000 + request_id}"
+    now = datetime.now(UTC).isoformat()
+
+    if settings.hedera_is_real:
+        if not job.escrow_account_id:
+            raise HTTPException(status_code=409, detail="escrow_not_created")
+        if job.status == JobStatus.ESCROW_FUNDED:
+            return {
+                "request_id": request_id,
+                "status": JobStatus.ESCROW_FUNDED,
+                "escrow_status": EscrowStatus.ESCROW_FUNDED,
+                "escrow_account_id": job.escrow_account_id,
+            }
+        escrow_svc = EscrowService()
+        if transaction_id:
+            # Mode 3: wallet already sent HBAR — poll to confirm balance arrived
+            confirmed = await escrow_svc.poll_balance(job.escrow_account_id, bid.amount_tinybar, 30)
+            if not confirmed:
+                return {
+                    "request_id": request_id,
+                    "status": "funding_timeout",
+                    "escrow_account_id": job.escrow_account_id,
+                    "amount_tinybar": bid.amount_tinybar,
+                }
+            tx_id = transaction_id
+        else:
+            # Mode 2: server funds using DEV_OWNER_PRIVATE_KEY
+            tx_id = escrow_svc.fund_from_dev_owner(job.escrow_account_id, bid.amount_tinybar)
+        escrow = job.escrow_account_id
+    else:
+        escrow = f"0.0.{99000 + request_id}"
+        tx_id = f"local:escrow:{request_id}"
+        job.escrow_account_id = escrow
+
     job.status = JobStatus.ESCROW_FUNDED
-    job.escrow_account_id = escrow
-    job.updated_at = datetime.now(UTC).isoformat()
-    await record_transaction(session, request_id, "escrow_fund", bid.amount_tinybar, "HBAR", "settled", f"local:escrow:{request_id}")
-    await add_audit(session, request_id, "escrow_funded", {"amount": bid.amount_tinybar})
-    logger.info("escrow.funded request_id=%s owner_wallet=%s amount=%s escrow=%s", request_id, user["hedera_account_id"], bid.amount_tinybar, escrow)
-    return {"request_id": request_id, "status": JobStatus.ESCROW_FUNDED, "escrow_status": EscrowStatus.ESCROW_FUNDED, "escrow_account_id": escrow}
+    job.updated_at = now
+    await record_transaction(session, request_id, "escrow_fund", bid.amount_tinybar, "HBAR", "settled", tx_id)
+    await add_audit(session, request_id, "escrow_funded", {"amount": bid.amount_tinybar, "tx_id": tx_id})
+    logger.info(
+        "escrow.funded request_id=%s owner_wallet=%s amount=%s escrow=%s tx_id=%s",
+        request_id, user["hedera_account_id"], bid.amount_tinybar, escrow, tx_id,
+    )
+    return {
+        "request_id": request_id,
+        "status": JobStatus.ESCROW_FUNDED,
+        "escrow_status": EscrowStatus.ESCROW_FUNDED,
+        "escrow_account_id": escrow,
+        "hedera_tx_id": tx_id,
+    }
 
 
 async def record_transaction(session: AsyncSession, job_id: int, tx_type: str, amount: int, token: str, status: str, hedera_tx_id: str) -> None:
@@ -607,7 +667,15 @@ async def release_payment(session: AsyncSession, request_id: int, user: dict[str
         bid_result = await session.execute(select(Bid).where(Bid.id == job.accepted_bid_id))
         bid = bid_result.scalar_one_or_none()
     amount = bid.amount_tinybar if bid else job.suggested_price_tinybar
-    tx_id = f"local:release:{request_id}"
+    if settings.hedera_is_real:
+        if not job.escrow_account_id:
+            raise HTTPException(status_code=409, detail="escrow_not_created")
+        supplier_result = await session.execute(select(User).where(User.id == job.supplier_user_id))
+        supplier = supplier_result.scalar_one()
+        escrow_svc = EscrowService()
+        tx_id = escrow_svc.release_escrow(job.escrow_account_id, supplier.hedera_account_id, amount)
+    else:
+        tx_id = f"local:release:{request_id}"
     await record_transaction(session, request_id, "release", amount, "HBAR", "settled", tx_id)
     await add_audit(session, request_id, "payment_released", {"tx_id": tx_id})
     logger.info("escrow.payment_released request_id=%s owner_wallet=%s amount=%s tx_id=%s", request_id, user["hedera_account_id"], amount, tx_id)

@@ -1,3 +1,5 @@
+import { connectHashPack, signChallengeWithHashPack, transferHbarWithHashPack } from "./services/hashconnect";
+
 type WalletSignatureResult = string | ArrayBuffer | Uint8Array | { signature?: unknown; accountId?: string; publicKey?: string };
 
 type WalletSigner = {
@@ -25,6 +27,18 @@ export type SignedWalletChallenge = {
 };
 
 export async function signWalletChallenge(message: string, devSignature: string): Promise<SignedWalletChallenge> {
+  // Try HashConnect first (v3 WalletConnect flow) when wallet is enabled
+  if (import.meta.env.VITE_WALLET_ENABLED === "true") {
+    try {
+      const { accountId, publicKey } = await connectHashPack();
+      const signature = await signChallengeWithHashPack(message);
+      return { signature, accountId, publicKey, source: "wallet" };
+    } catch {
+      // Fall through to legacy window injection or dev mock
+    }
+  }
+
+  // Legacy window injection fallback
   const signer = findWalletSigner();
   if (!signer) return { signature: devSignature, source: "dev" };
 
@@ -39,6 +53,13 @@ export async function signWalletChallenge(message: string, devSignature: string)
     publicKey: parsed.publicKey ?? signer.publicKey,
     source: "wallet",
   };
+}
+
+export async function transferHbar(
+  toAccountId: string,
+  amountTinybar: number,
+): Promise<{ transactionId: string }> {
+  return transferHbarWithHashPack(toAccountId, amountTinybar);
 }
 
 function findWalletSigner(): WalletSigner | null {

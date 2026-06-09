@@ -230,5 +230,9 @@ backend/escroweye.sqlite3
 backend/uploads/
 .playwright-mcp/
 
+# Local env overrides (never commit — contain secrets)
+*.env.local
+.env.local
+
 # macOS
 .DS_Store

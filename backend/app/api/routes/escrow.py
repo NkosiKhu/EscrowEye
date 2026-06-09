@@ -13,6 +13,10 @@ class DisputeCreateIn(BaseModel):
     reason: str = "Owner opened a dispute."
 
 
+class FundEscrowIn(BaseModel):
+    transaction_id: str | None = None
+
+
 def create_escrow_router(*, db: Callable, current_user: Callable) -> APIRouter:
     router = APIRouter(prefix="/api", tags=["escrow"])
 
@@ -22,9 +26,13 @@ def create_escrow_router(*, db: Callable, current_user: Callable) -> APIRouter:
             return await marketplace_service.pay_base_fee(session, request_id, user)
 
     @router.post("/service-requests/{request_id}/fund-escrow")
-    async def fund_service_escrow(request_id: int, user: dict[str, Any] = Depends(current_user)):
+    async def fund_service_escrow(
+        request_id: int,
+        body: FundEscrowIn = FundEscrowIn(),
+        user: dict[str, Any] = Depends(current_user),
+    ):
         async with db() as session:
-            return await marketplace_service.fund_escrow(session, request_id, user)
+            return await marketplace_service.fund_escrow(session, request_id, user, body.transaction_id)
 
     @router.get("/service-requests/{request_id}/escrow")
     async def service_escrow(request_id: int, _user: dict[str, Any] = Depends(current_user)):

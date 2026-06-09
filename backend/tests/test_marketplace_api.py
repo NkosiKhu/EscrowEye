@@ -1,8 +1,20 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 from tests.conftest import auth, login, make_client
+
+
+def _mock_escrow_ctx():
+    """Context manager that patches marketplace.EscrowService with a no-op mock.
+    Used to keep tests in dev/simulated mode regardless of HEDERA_NETWORK."""
+    mock_instance = MagicMock()
+    mock_instance.create_escrow_account_with_public_keys.return_value = "0.0.99001"
+    mock_instance.fund_from_dev_owner.return_value = "0.0.99001@1234567890.000000000"
+    mock_instance.release_escrow.return_value = "0.0.99001@1234567890.000000001"
+    ctx = patch("app.services.marketplace.EscrowService", return_value=mock_instance)
+    return ctx, mock_instance
 
 
 def test_service_categories_and_workers_are_open_for_marketplace(tmp_path: Path) -> None:
@@ -18,120 +30,126 @@ def test_service_categories_and_workers_are_open_for_marketplace(tmp_path: Path)
 
 
 def test_owner_creates_paid_service_request_and_supplier_quote_is_accepted(tmp_path: Path) -> None:
-    client = make_client(tmp_path)
-    owner_token = login(client, "0.0.1001", "owner")
-    supplier_token = login(client, "0.0.2001", "supplier")
+    ctx, mock_escrow = _mock_escrow_ctx()
+    with ctx:
+        client = make_client(tmp_path)
+        owner_token = login(client, "0.0.1001", "owner")
+        supplier_token = login(client, "0.0.2001", "supplier")
 
-    request_response = client.post(
-        "/api/service-requests",
-        headers={**auth(owner_token), "X-PAYMENT": "paid"},
-        json={
-            "title": "Window cleaning services",
-            "description": "Clean exterior windows and upload proof.",
-            "address": "10b Gerrard Road, Ikoyi, Lagos",
-            "location_description": "Two-storey building",
-            "schedule": "Sat, 1 Mar 2025",
-            "budget_amount": 200_000_000,
-            "category": "cleaning",
-        },
-    )
-    assert request_response.status_code == 201
-    request_id = request_response.json()["id"]
+        request_response = client.post(
+            "/api/service-requests",
+            headers={**auth(owner_token), "X-PAYMENT": "paid"},
+            json={
+                "title": "Window cleaning services",
+                "description": "Clean exterior windows and upload proof.",
+                "address": "10b Gerrard Road, Ikoyi, Lagos",
+                "location_description": "Two-storey building",
+                "schedule": "Sat, 1 Mar 2025",
+                "budget_amount": 200_000_000,
+                "category": "cleaning",
+            },
+        )
+        assert request_response.status_code == 201
+        request_id = request_response.json()["id"]
 
-    quote = client.post(
-        f"/api/service-requests/{request_id}/quotes",
-        headers=auth(supplier_token),
-        json={"amount": 220_000_000, "message": "Can complete this weekend.", "scope": "Windows and frames", "timeline": "1 day"},
-    )
-    assert quote.status_code == 201
+        quote = client.post(
+            f"/api/service-requests/{request_id}/quotes",
+            headers=auth(supplier_token),
+            json={"amount": 220_000_000, "message": "Can complete this weekend.", "scope": "Windows and frames", "timeline": "1 day"},
+        )
+        assert quote.status_code == 201
 
-    accepted = client.post(f"/api/quotes/{quote.json()['id']}/accept", headers=auth(owner_token))
+        accepted = client.post(f"/api/quotes/{quote.json()['id']}/accept", headers=auth(owner_token))
 
-    assert accepted.status_code == 200
-    body = accepted.json()
-    assert body["status"] == "quote_accepted"
-    assert body["quote_amount"] == 220_000_000
-    assert body["base_commitment_fee"] == 44_000_000
+        assert accepted.status_code == 200
+        body = accepted.json()
+        assert body["status"] == "quote_accepted"
+        assert body["quote_amount"] == 220_000_000
+        assert body["base_commitment_fee"] == 44_000_000
 
 
 def test_escrow_proof_ai_validation_and_release_flow(tmp_path: Path) -> None:
-    client = make_client(tmp_path)
-    owner_token = login(client, "0.0.1002", "owner")
-    supplier_token = login(client, "0.0.2002", "supplier")
+    ctx, mock_escrow = _mock_escrow_ctx()
+    with ctx:
+        client = make_client(tmp_path)
+        owner_token = login(client, "0.0.1002", "owner")
+        supplier_token = login(client, "0.0.2002", "supplier")
 
-    request_id = client.post(
-        "/api/service-requests",
-        headers={**auth(owner_token), "X-PAYMENT": "paid"},
-        json={
-            "title": "Airbnb turnover clean",
-            "description": "Clean and document all rooms.",
-            "address": "45 Adeola Odeku Street",
-            "schedule": "Tue, 4 Mar 2025",
-            "budget_amount": 300_000_000,
-            "category": "airbnb",
-        },
-    ).json()["id"]
-    quote_id = client.post(
-        f"/api/service-requests/{request_id}/quotes",
-        headers=auth(supplier_token),
-        json={"amount": 250_000_000, "message": "Ready.", "scope": "Full turnover", "timeline": "same day"},
-    ).json()["id"]
-    client.post(f"/api/quotes/{quote_id}/accept", headers=auth(owner_token))
-    assert client.post(f"/api/service-requests/{request_id}/fund-escrow", headers=auth(owner_token), json={}).status_code == 200
+        request_id = client.post(
+            "/api/service-requests",
+            headers={**auth(owner_token), "X-PAYMENT": "paid"},
+            json={
+                "title": "Airbnb turnover clean",
+                "description": "Clean and document all rooms.",
+                "address": "45 Adeola Odeku Street",
+                "schedule": "Tue, 4 Mar 2025",
+                "budget_amount": 300_000_000,
+                "category": "airbnb",
+            },
+        ).json()["id"]
+        quote_id = client.post(
+            f"/api/service-requests/{request_id}/quotes",
+            headers=auth(supplier_token),
+            json={"amount": 250_000_000, "message": "Ready.", "scope": "Full turnover", "timeline": "same day"},
+        ).json()["id"]
+        client.post(f"/api/quotes/{quote_id}/accept", headers=auth(owner_token))
+        assert client.post(f"/api/service-requests/{request_id}/fund-escrow", headers=auth(owner_token), json={}).status_code == 200
 
-    proof = client.post(
-        f"/api/service-requests/{request_id}/proof",
-        headers=auth(supplier_token),
-        files={"files": ("kitchen-clean.jpg", b"fake image", "image/jpeg")},
-        data={"room_or_area_label": "Kitchen", "notes": "After-clean proof"},
-    )
-    assert proof.status_code == 201
+        proof = client.post(
+            f"/api/service-requests/{request_id}/proof",
+            headers=auth(supplier_token),
+            files={"files": ("kitchen-clean.jpg", b"fake image", "image/jpeg")},
+            data={"room_or_area_label": "Kitchen", "notes": "After-clean proof"},
+        )
+        assert proof.status_code == 201
 
-    validation = client.post(f"/api/service-requests/{request_id}/ai-validation/run", headers=auth(owner_token))
-    assert validation.status_code == 200
-    assert validation.json()["status"] == "passed"
+        validation = client.post(f"/api/service-requests/{request_id}/ai-validation/run", headers=auth(owner_token))
+        assert validation.status_code == 200
+        assert validation.json()["status"] == "passed"
 
-    confirmed = client.post(f"/api/service-requests/{request_id}/confirm-satisfaction", headers=auth(owner_token), json={})
-    released = client.post(f"/api/service-requests/{request_id}/release-payment", headers=auth(owner_token), json={})
+        confirmed = client.post(f"/api/service-requests/{request_id}/confirm-satisfaction", headers=auth(owner_token), json={})
+        released = client.post(f"/api/service-requests/{request_id}/release-payment", headers=auth(owner_token), json={})
 
-    assert confirmed.status_code == 200
-    assert released.status_code == 200
-    assert released.json()["escrow_status"] == "released"
+        assert confirmed.status_code == 200
+        assert released.status_code == 200
+        assert released.json()["escrow_status"] == "released"
 
 
 def test_supplier_job_lists_and_earnings_use_role_specific_views(tmp_path: Path) -> None:
-    client = make_client(tmp_path)
-    owner_token = login(client, "0.0.1003", "owner")
-    supplier_token = login(client, "0.0.2003", "supplier")
+    ctx, _mock_escrow = _mock_escrow_ctx()
+    with ctx:
+        client = make_client(tmp_path)
+        owner_token = login(client, "0.0.1003", "owner")
+        supplier_token = login(client, "0.0.2003", "supplier")
 
-    request_id = client.post(
-        "/api/service-requests",
-        headers={**auth(owner_token), "X-PAYMENT": "paid"},
-        json={
-            "title": "Pool cleaning",
-            "description": "Clean and inspect pool.",
-            "address": "Banana Island",
-            "schedule": "Fri, 7 Mar 2025",
-            "budget_amount": 120_000_000,
-            "category": "pool-cleaning",
-        },
-    ).json()["id"]
-    quote_id = client.post(
-        f"/api/service-requests/{request_id}/quotes",
-        headers=auth(supplier_token),
-        json={"amount": 120_000_000, "message": "Available.", "scope": "Pool clean", "timeline": "2 hours"},
-    ).json()["id"]
+        request_id = client.post(
+            "/api/service-requests",
+            headers={**auth(owner_token), "X-PAYMENT": "paid"},
+            json={
+                "title": "Pool cleaning",
+                "description": "Clean and inspect pool.",
+                "address": "Banana Island",
+                "schedule": "Fri, 7 Mar 2025",
+                "budget_amount": 120_000_000,
+                "category": "pool-cleaning",
+            },
+        ).json()["id"]
+        quote_id = client.post(
+            f"/api/service-requests/{request_id}/quotes",
+            headers=auth(supplier_token),
+            json={"amount": 120_000_000, "message": "Available.", "scope": "Pool clean", "timeline": "2 hours"},
+        ).json()["id"]
 
-    offers = client.get("/api/supplier/jobs/offers", headers=auth(supplier_token))
-    client.post(f"/api/quotes/{quote_id}/accept", headers=auth(owner_token))
-    active = client.get("/api/supplier/jobs/active", headers=auth(supplier_token))
-    earnings = client.get("/api/supplier/earnings", headers=auth(supplier_token))
+        offers = client.get("/api/supplier/jobs/offers", headers=auth(supplier_token))
+        client.post(f"/api/quotes/{quote_id}/accept", headers=auth(owner_token))
+        active = client.get("/api/supplier/jobs/active", headers=auth(supplier_token))
+        earnings = client.get("/api/supplier/earnings", headers=auth(supplier_token))
 
-    assert offers.status_code == 200
-    assert active.status_code == 200
-    assert active.json()["jobs"][0]["id"] == request_id
-    assert earnings.status_code == 200
-    assert "pending_earnings" in earnings.json()
+        assert offers.status_code == 200
+        assert active.status_code == 200
+        assert active.json()["jobs"][0]["id"] == request_id
+        assert earnings.status_code == 200
+        assert "pending_earnings" in earnings.json()
 
 
 def test_role_guards_block_wrong_marketplace_actions(tmp_path: Path) -> None:
@@ -162,39 +180,41 @@ def test_role_guards_block_wrong_marketplace_actions(tmp_path: Path) -> None:
 
 
 def test_escrow_release_requires_quote_acceptance_and_validation(tmp_path: Path) -> None:
-    client = make_client(tmp_path)
-    owner_token = login(client, "0.0.1011", "owner")
-    supplier_token = login(client, "0.0.2011", "supplier")
+    ctx, _mock_escrow = _mock_escrow_ctx()
+    with ctx:
+        client = make_client(tmp_path)
+        owner_token = login(client, "0.0.1011", "owner")
+        supplier_token = login(client, "0.0.2011", "supplier")
 
-    request_id = client.post(
-        "/api/service-requests",
-        headers={**auth(owner_token), "X-PAYMENT": "paid"},
-        json={
-            "title": "Maintenance request",
-            "description": "Fix and document work.",
-            "address": "Lekki",
-            "schedule": "Tomorrow",
-            "budget_amount": 180_000_000,
-            "category": "maintenance",
-        },
-    ).json()["id"]
+        request_id = client.post(
+            "/api/service-requests",
+            headers={**auth(owner_token), "X-PAYMENT": "paid"},
+            json={
+                "title": "Maintenance request",
+                "description": "Fix and document work.",
+                "address": "Lekki",
+                "schedule": "Tomorrow",
+                "budget_amount": 180_000_000,
+                "category": "maintenance",
+            },
+        ).json()["id"]
 
-    fund_too_early = client.post(f"/api/service-requests/{request_id}/fund-escrow", headers=auth(owner_token), json={})
-    assert fund_too_early.status_code == 409
+        fund_too_early = client.post(f"/api/service-requests/{request_id}/fund-escrow", headers=auth(owner_token), json={})
+        assert fund_too_early.status_code == 409
 
-    quote_id = client.post(
-        f"/api/service-requests/{request_id}/quotes",
-        headers=auth(supplier_token),
-        json={"amount": 180_000_000, "message": "I can do it."},
-    ).json()["id"]
-    client.post(f"/api/quotes/{quote_id}/accept", headers=auth(owner_token))
-    client.post(f"/api/service-requests/{request_id}/fund-escrow", headers=auth(owner_token), json={})
+        quote_id = client.post(
+            f"/api/service-requests/{request_id}/quotes",
+            headers=auth(supplier_token),
+            json={"amount": 180_000_000, "message": "I can do it."},
+        ).json()["id"]
+        client.post(f"/api/quotes/{quote_id}/accept", headers=auth(owner_token))
+        client.post(f"/api/service-requests/{request_id}/fund-escrow", headers=auth(owner_token), json={})
 
-    confirm_too_early = client.post(f"/api/service-requests/{request_id}/confirm-satisfaction", headers=auth(owner_token), json={})
-    release_too_early = client.post(f"/api/service-requests/{request_id}/release-payment", headers=auth(owner_token), json={})
+        confirm_too_early = client.post(f"/api/service-requests/{request_id}/confirm-satisfaction", headers=auth(owner_token), json={})
+        release_too_early = client.post(f"/api/service-requests/{request_id}/release-payment", headers=auth(owner_token), json={})
 
-    assert confirm_too_early.status_code == 409
-    assert release_too_early.status_code == 409
+        assert confirm_too_early.status_code == 409
+        assert release_too_early.status_code == 409
 
 
 def test_proof_upload_changes_job_status_and_creates_audit_event(tmp_path: Path) -> None:
@@ -227,3 +247,88 @@ def test_proof_upload_changes_job_status_and_creates_audit_event(tmp_path: Path)
     assert proof.status_code == 201
     assert detail.json()["status"] == "proof_uploaded"
     assert "proof_uploaded" in [event["type"] for event in audit.json()["events"]]
+
+
+def test_escrow_service_called_in_testnet_mode(tmp_path: Path) -> None:
+    """When hedera_is_real=True, EscrowService methods must be called on accept, fund, release."""
+    ctx, mock_escrow = _mock_escrow_ctx()
+    with ctx, patch("app.services.marketplace.settings") as mock_settings:
+        mock_settings.hedera_is_real = True
+        client = make_client(tmp_path)
+        owner_token = login(client, "0.0.5001", "owner")
+        supplier_token = login(client, "0.0.6001", "supplier")
+
+        request_id = client.post(
+            "/api/service-requests",
+            headers={**auth(owner_token), "X-PAYMENT": "paid"},
+            json={
+                "title": "Testnet escrow test",
+                "description": "Full cycle on testnet.",
+                "address": "Test St",
+                "schedule": "Mon",
+                "budget_amount": 100_000_000,
+                "category": "cleaning",
+            },
+        ).json()["id"]
+        quote_id = client.post(
+            f"/api/service-requests/{request_id}/quotes",
+            headers=auth(supplier_token),
+            json={"amount": 100_000_000, "message": "Ready.", "scope": "All rooms", "timeline": "1 day"},
+        ).json()["id"]
+
+        # accept_quote → create_escrow_account_with_public_keys called
+        client.post(f"/api/quotes/{quote_id}/accept", headers=auth(owner_token))
+        mock_escrow.create_escrow_account_with_public_keys.assert_called_once()
+
+        # fund_escrow (no transaction_id) → fund_from_dev_owner called
+        client.post(f"/api/service-requests/{request_id}/fund-escrow", headers=auth(owner_token), json={})
+        mock_escrow.fund_from_dev_owner.assert_called_once()
+
+        # Run AI validation + confirm so release is allowed
+        client.post(
+            f"/api/service-requests/{request_id}/proof",
+            headers=auth(supplier_token),
+            files={"files": ("proof.jpg", b"img", "image/jpeg")},
+            data={"room_or_area_label": "Lounge", "notes": "Done"},
+        )
+        client.post(f"/api/service-requests/{request_id}/ai-validation/run", headers=auth(owner_token))
+        client.post(f"/api/service-requests/{request_id}/confirm-satisfaction", headers=auth(owner_token), json={})
+
+        # release_payment → release_escrow called
+        client.post(f"/api/service-requests/{request_id}/release-payment", headers=auth(owner_token), json={})
+        mock_escrow.release_escrow.assert_called_once()
+
+
+def test_escrow_service_not_called_in_dev_mode(tmp_path: Path) -> None:
+    """When hedera_is_real=False (dev mode), EscrowService must NOT be called."""
+    ctx, mock_escrow = _mock_escrow_ctx()
+    with ctx, patch("app.services.marketplace.settings") as mock_settings:
+        mock_settings.hedera_is_real = False
+        client = make_client(tmp_path)
+        owner_token = login(client, "0.0.5002", "owner")
+        supplier_token = login(client, "0.0.6002", "supplier")
+
+        request_id = client.post(
+            "/api/service-requests",
+            headers={**auth(owner_token), "X-PAYMENT": "paid"},
+            json={
+                "title": "Dev mode test",
+                "description": "Should be fully simulated.",
+                "address": "Somewhere",
+                "schedule": "Fri",
+                "budget_amount": 50_000_000,
+                "category": "cleaning",
+            },
+        ).json()["id"]
+        quote_id = client.post(
+            f"/api/service-requests/{request_id}/quotes",
+            headers=auth(supplier_token),
+            json={"amount": 50_000_000, "message": "Ok.", "scope": "Rooms", "timeline": "2h"},
+        ).json()["id"]
+
+        client.post(f"/api/quotes/{quote_id}/accept", headers=auth(owner_token))
+        mock_escrow.create_escrow_account_with_public_keys.assert_not_called()
+
+        client.post(f"/api/service-requests/{request_id}/fund-escrow", headers=auth(owner_token), json={})
+        mock_escrow.fund_from_dev_owner.assert_not_called()
+        mock_escrow.poll_balance.assert_not_called()

@@ -150,14 +150,42 @@ function App() {
             pendingPayment={pendingPayment}
             onSubmitRequest={submitOwnerRequest}
             onReplayPayment={(paymentHeader) => pendingPayment && createServiceRequest(pendingPayment.payload, paymentHeader || "mock-paid-x402-header")}
+            onAcceptQuote={(quoteId) =>
+              mutateJob(
+                () => api.acceptQuote(quoteId),
+                "Quote accepted. Hedera escrow account created.",
+              )
+            }
+            onFundEscrow={(requestId, transactionId) =>
+              mutateJob(
+                () => api.fundEscrow(requestId, transactionId),
+                "Escrow funded on Hedera testnet.",
+              )
+            }
             onConfirm={() => {
               if (!workspaceData.workspace.job) return Promise.resolve();
               const body = { action: "confirm_job", job_id: workspaceData.workspace.job.id, timestamp: Date.now() };
               return mutateJob(
                 () => api.confirmSatisfaction(workspaceData.workspace.job!.id, { signature: "mock_hashpack_confirmation_signature", message: JSON.stringify(body) }),
-                "Owner satisfaction confirmed. Payment release event recorded.",
+                "Owner satisfaction confirmed.",
               );
             }}
+            onRunAiValidation={() =>
+              workspaceData.workspace.job
+                ? mutateJob(
+                    () => api.runAiValidation(workspaceData.workspace.job!.id),
+                    "AI validation complete.",
+                  )
+                : Promise.resolve()
+            }
+            onReleasePayment={() =>
+              workspaceData.workspace.job
+                ? mutateJob(
+                    () => api.releasePayment(workspaceData.workspace.job!.id),
+                    "Payment released to supplier on Hedera testnet.",
+                  )
+                : Promise.resolve()
+            }
             onDispute={(reason) =>
               workspaceData.workspace.job
                 ? mutateJob(() => api.dispute(workspaceData.workspace.job!.id, reason), "Dispute opened for EscrowEye review.")
@@ -213,7 +241,11 @@ function OwnerWorkspace({
   pendingPayment,
   onSubmitRequest,
   onReplayPayment,
+  onAcceptQuote,
+  onFundEscrow,
   onConfirm,
+  onRunAiValidation,
+  onReleasePayment,
   onDispute,
   workspaceData,
 }: {
@@ -224,7 +256,11 @@ function OwnerWorkspace({
   pendingPayment: PendingServicePayment | null;
   onSubmitRequest: (request: RequestDraft) => Promise<void>;
   onReplayPayment: (paymentHeader: string) => Promise<void> | null;
+  onAcceptQuote: (quoteId: number) => Promise<void>;
+  onFundEscrow: (requestId: number, transactionId?: string) => Promise<void>;
   onConfirm: () => Promise<void>;
+  onRunAiValidation: () => Promise<void>;
+  onReleasePayment: () => Promise<void>;
   onDispute: (reason: string) => Promise<void>;
   workspaceData: WorkspaceHook;
 }) {
@@ -233,6 +269,7 @@ function OwnerWorkspace({
       view={view}
       profile={profile}
       jobs={workspaceData.ownerJobs}
+      bids={workspaceData.workspace.bids}
       categories={workspaceData.categories}
       workers={workspaceData.workerResults}
       activeWorker={workspaceData.activeWorker}
@@ -246,7 +283,12 @@ function OwnerWorkspace({
       onSubmitRequest={onSubmitRequest}
       onReplayPayment={onReplayPayment}
       onSelectJob={workspaceData.setSelectedJobId}
+      onAcceptQuote={onAcceptQuote}
+      onFundEscrow={onFundEscrow}
+      onRefreshJob={() => workspaceData.selectedJobId ? workspaceData.loadJobWorkspace(workspaceData.selectedJobId) : undefined}
       onConfirm={onConfirm}
+      onRunAiValidation={onRunAiValidation}
+      onReleasePayment={onReleasePayment}
       onDispute={onDispute}
     />
   );

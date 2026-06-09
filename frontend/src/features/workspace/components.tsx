@@ -1,5 +1,6 @@
 import React, { useRef, useState } from "react";
 import { formatDate, statusLabel, tinybarToHbar, truncateMiddle } from "../../format";
+import { transferHbar } from "../../wallet";
 import type { ApiUser, AuditEvent, Bid, JobDetail, JobSummary, Message, Photo, ServiceCategory, UserType } from "../../types";
 import { sampleJobs, serviceCategories } from "./demoData";
 import type { JobTab, OwnerView, PendingServicePayment, Profile, QuoteState, RequestDraft, RequestStep, SupplierView, WorkerProfile } from "./models";
@@ -118,6 +119,7 @@ function OwnerDesktop({
   view,
   profile,
   jobs,
+  bids,
   categories,
   workers,
   activeWorker,
@@ -131,12 +133,18 @@ function OwnerDesktop({
   onSubmitRequest,
   onReplayPayment,
   onSelectJob,
+  onAcceptQuote,
+  onFundEscrow,
+  onRefreshJob,
   onConfirm,
+  onRunAiValidation,
+  onReleasePayment,
   onDispute,
 }: {
   view: OwnerView;
   profile: Profile;
   jobs: JobSummary[];
+  bids: Bid[];
   categories: ServiceCategory[];
   workers: WorkerProfile[];
   activeWorker: WorkerProfile;
@@ -150,12 +158,33 @@ function OwnerDesktop({
   onSubmitRequest: (request: RequestDraft) => Promise<void>;
   onReplayPayment: (paymentHeader: string) => Promise<void> | null;
   onSelectJob: (id: number) => void;
+  onAcceptQuote?: (quoteId: number) => Promise<void>;
+  onFundEscrow?: (requestId: number, transactionId?: string) => Promise<void>;
+  onRefreshJob?: () => void;
   onConfirm: () => Promise<void>;
+  onRunAiValidation?: () => Promise<void>;
+  onReleasePayment?: () => Promise<void>;
   onDispute: (reason: string) => Promise<void>;
 }) {
   if (view === "messages") return <MessagesPanel messages={selectedJob ? [`Quote and escrow updates for ${selectedJob.title}`, "EscrowEye AI validation messages appear here."] : ["No active request selected."]} />;
   if (view === "profile") return <ProfilePanel profile={profile} role="Owner" />;
-  if (view === "requests") return <OwnerRequests jobs={jobs} selectedJob={selectedJob} photos={photos} auditEvents={auditEvents} onSelectJob={onSelectJob} onConfirm={onConfirm} onDispute={onDispute} />;
+  if (view === "requests") return (
+    <OwnerRequests
+      jobs={jobs}
+      bids={bids}
+      selectedJob={selectedJob}
+      photos={photos}
+      auditEvents={auditEvents}
+      onSelectJob={onSelectJob}
+      onAcceptQuote={onAcceptQuote}
+      onFundEscrow={onFundEscrow}
+      onRefreshJob={onRefreshJob}
+      onConfirm={onConfirm}
+      onRunAiValidation={onRunAiValidation}
+      onReleasePayment={onReleasePayment}
+      onDispute={onDispute}
+    />
+  );
 
   return (
     <section className="owner-grid">
@@ -304,8 +333,71 @@ function WorkerProfileCard({ worker, onRequest }: { worker: WorkerProfile; onReq
   );
 }
 
-function OwnerRequests({ jobs, selectedJob, photos, auditEvents, onSelectJob, onConfirm, onDispute }: { jobs: JobSummary[]; selectedJob: JobDetail | null; photos: Photo[]; auditEvents: AuditEvent[]; onSelectJob: (id: number) => void; onConfirm: () => Promise<void>; onDispute: (reason: string) => Promise<void> }) {
+function FundEscrowButton({
+  escrowAccountId,
+  amountTinybar,
+  onFundEscrow,
+  onFunded,
+}: {
+  escrowAccountId: string;
+  amountTinybar: number;
+  onFundEscrow: (transactionId?: string) => Promise<void>;
+  onFunded: () => void;
+}) {
+  const [state, setState] = useState<"idle" | "signing" | "polling" | "done">("idle");
+  const walletEnabled = import.meta.env.VITE_WALLET_ENABLED === "true";
+
+  async function handleFund() {
+    setState("signing");
+    try {
+      if (walletEnabled) {
+        const { transactionId } = await transferHbar(escrowAccountId, amountTinybar);
+        setState("polling");
+        await onFundEscrow(transactionId);
+      } else {
+        await onFundEscrow();
+      }
+      setState("done");
+      onFunded();
+    } catch {
+      setState("idle");
+    }
+  }
+
+  if (state === "signing") return <p>Waiting for HashPack signature&hellip;</p>;
+  if (state === "polling") return <p>Confirming on Hedera testnet&hellip;</p>;
+  if (state === "done") return <p>Escrow funded ✓</p>;
+  return (
+    <button className="primary-button" onClick={handleFund}>
+      {walletEnabled
+        ? `Fund with HashPack (${tinybarToHbar(amountTinybar)} HBAR)`
+        : `Fund escrow (${tinybarToHbar(amountTinybar)} HBAR)`}
+    </button>
+  );
+}
+
+function OwnerRequests({
+  jobs, selectedJob, bids, photos, auditEvents,
+  onSelectJob, onAcceptQuote, onFundEscrow, onRefreshJob,
+  onConfirm, onRunAiValidation, onReleasePayment, onDispute,
+}: {
+  jobs: JobSummary[];
+  selectedJob: JobDetail | null;
+  bids: Bid[];
+  photos: Photo[];
+  auditEvents: AuditEvent[];
+  onSelectJob: (id: number) => void;
+  onAcceptQuote?: (quoteId: number) => Promise<void>;
+  onFundEscrow?: (requestId: number, transactionId?: string) => Promise<void>;
+  onRefreshJob?: () => void;
+  onConfirm: () => Promise<void>;
+  onRunAiValidation?: () => Promise<void>;
+  onReleasePayment?: () => Promise<void>;
+  onDispute: (reason: string) => Promise<void>;
+}) {
   const [reason, setReason] = useState("Uploaded proof needs more evidence.");
+  const pendingBids = bids.filter((b) => b.status === "pending");
+
   return (
     <section className="split-grid">
       <div className="panel">
@@ -320,12 +412,60 @@ function OwnerRequests({ jobs, selectedJob, photos, auditEvents, onSelectJob, on
           <div className="detail-stack">
             <PanelHead title="Owner job detail" />
             <h2>{selectedJob.title}</h2>
+            <Fact label="Status" value={statusLabel(selectedJob.status)} />
             <Fact label="Supplier" value={selectedJob.supplier?.hedera_account_id ?? "Waiting for quote"} />
             <Fact label="Budget" value={`${tinybarToHbar(selectedJob.suggested_price_tinybar)} HBAR`} />
-            <Fact label="Base commitment fee" value={`${tinybarToHbar(selectedJob.suggested_price_tinybar * 0.2)} HBAR`} />
             <Fact label="Escrow" value={selectedJob.escrow_account_id ?? "Escrow pending"} />
+
+            {/* Incoming quotes — visible until one is accepted */}
+            {pendingBids.length > 0 && (
+              <div className="quotes-stack">
+                <p className="eyebrow">Incoming quotes</p>
+                {pendingBids.map((bid) => (
+                  <div key={bid.id} className="quote-row">
+                    <span>{tinybarToHbar(bid.amount_tinybar)} HBAR</span>
+                    {bid.message && <span className="muted"> — {bid.message}</span>}
+                    {onAcceptQuote && (
+                      <button className="primary-button" onClick={() => onAcceptQuote(bid.id)}>
+                        Accept quote
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Fund escrow — visible after quote accepted and escrow account created */}
+            {selectedJob.escrow_account_id && selectedJob.status === "quote_accepted" && onFundEscrow && (
+              <FundEscrowButton
+                escrowAccountId={selectedJob.escrow_account_id}
+                amountTinybar={selectedJob.accepted_bid?.amount_tinybar ?? selectedJob.suggested_price_tinybar}
+                onFundEscrow={(txId) => onFundEscrow(selectedJob.id, txId)}
+                onFunded={() => onRefreshJob?.()}
+              />
+            )}
+
             <AiValidation photos={photos} auditEvents={auditEvents} />
-            <button className="primary-button" onClick={onConfirm}>Confirm satisfaction</button>
+
+            {/* Run AI validation — visible once proof has been uploaded */}
+            {selectedJob.status === "proof_uploaded" && onRunAiValidation && (
+              <button className="primary-button" onClick={onRunAiValidation}>
+                Run AI validation
+              </button>
+            )}
+
+            {/* Confirm satisfaction — visible when AI has passed */}
+            {selectedJob.status === "awaiting_owner_confirmation" && (
+              <button className="primary-button" onClick={onConfirm}>Confirm satisfaction</button>
+            )}
+
+            {/* Release payment — visible when owner has confirmed */}
+            {selectedJob.status === "completed" && onReleasePayment && (
+              <button className="primary-button" onClick={onReleasePayment}>
+                Release payment
+              </button>
+            )}
+
             <textarea value={reason} onChange={(event) => setReason(event.target.value)} />
             <button className="outline-button" onClick={() => onDispute(reason)}>Open dispute</button>
           </div>

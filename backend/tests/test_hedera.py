@@ -18,7 +18,9 @@ def mock_escrow():
             "status": "SUCCESS",
         }
         instance.release_escrow.return_value = "0.0.10001@1234567890.000000000"
-        instance.poll_balance.return_value = True
+        # poll_balance is now async — use AsyncMock so `await instance.poll_balance(...)` works
+        from unittest.mock import AsyncMock
+        instance.poll_balance = AsyncMock(return_value=True)
         yield instance
 
 
