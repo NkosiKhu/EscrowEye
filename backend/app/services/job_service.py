@@ -13,9 +13,10 @@ from fastapi import HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.infrastructure.ipfs_service import IPFSService
 from app.infrastructure.models import Bid, Home, Job, Message, MessagePhoto, Photo, Room, User
 from app.services._base import audit_events as base_audit_events
-from app.services._base import get_job, get_user, mock_cid
+from app.services._base import get_job, get_user
 
 
 class JobService:
@@ -30,6 +31,7 @@ class JobService:
         upload_dir: Path,
         openrouter_api_key: str | None,
         openrouter_model: str,
+        ipfs_service: IPFSService | None = None,
     ):
         self.session = session
         self.now_iso = now_iso
@@ -39,6 +41,7 @@ class JobService:
         self.upload_dir = upload_dir
         self.openrouter_api_key = openrouter_api_key
         self.openrouter_model = openrouter_model
+        self.ipfs_service = ipfs_service or IPFSService()
 
     async def job_summary(self, job: Job) -> dict[str, Any]:
         home_result = await self.session.execute(select(Home).where(Home.id == job.home_id))
@@ -362,7 +365,8 @@ class JobService:
                 raise HTTPException(status_code=404, detail="room_not_found")
         seq_result = await self.session.execute(select(func.coalesce(func.max(Photo.sequence), 0)).where(Photo.job_id == job_id))
         seq = (seq_result.scalar() or 0) + 1
-        cid = mock_cid(content, filename)
+        upload_result = self.ipfs_service.upload_file(content, filename or "photo.bin", content_type, {"job_id": job_id, "user_id": user_id, "sequence": seq})
+        cid = upload_result.cid
         suffix = Path(filename or "photo.bin").suffix or ".bin"
         storage_path = self.upload_dir / f"job-{job_id}-photo-{seq}-{cid[:16]}{suffix}"
         storage_path.write_bytes(content)

@@ -9,17 +9,19 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
+from app.infrastructure.ipfs_service import IPFSService
 from app.infrastructure.models import Job, Photo, ProofUpload, Room
-from app.services._base import add_audit, mock_cid
+from app.services._base import add_audit
 
 logger = get_logger("escroweye.proof")
 
 
 class ProofService:
-    def __init__(self, session: AsyncSession, *, now_iso: Callable[[], str], upload_dir: Path):
+    def __init__(self, session: AsyncSession, *, now_iso: Callable[[], str], upload_dir: Path, ipfs_service: IPFSService | None = None):
         self.session = session
         self.now_iso = now_iso
         self.upload_dir = upload_dir
+        self.ipfs_service = ipfs_service or IPFSService()
 
     async def create_proof_record(
         self, request_id: int, user_id: int, content: bytes, filename: str, content_type: str | None, room_or_area_label: str | None, notes: str | None
@@ -28,7 +30,13 @@ class ProofService:
         result.scalar_one_or_none()
         seq_result = await self.session.execute(select(func.coalesce(func.max(Photo.sequence), 0)).where(Photo.job_id == request_id))
         seq = (seq_result.scalar() or 0) + 1
-        cid = mock_cid(content, filename)
+        upload_result = self.ipfs_service.upload_file(
+            content,
+            filename or "proof.bin",
+            content_type,
+            {"request_id": request_id, "user_id": user_id, "sequence": seq, "room_or_area_label": room_or_area_label or ""},
+        )
+        cid = upload_result.cid
         suffix = Path(filename or "proof.bin").suffix or ".bin"
         storage_path = self.upload_dir / f"request-{request_id}-proof-{seq}-{cid[:16]}{suffix}"
         storage_path.write_bytes(content)
@@ -56,7 +64,10 @@ class ProofService:
             photo_id=photo.id,
             uploaded_by_user_id=user_id,
             file_type="video" if (content_type or "").startswith("video/") else "image",
-            storage_url=str(storage_path),
+            storage_url=upload_result.storage_url,
+            storage_provider=upload_result.provider,
+            gateway_url=upload_result.gateway_url,
+            local_path=str(storage_path),
             cid=cid,
             room_or_area_label=room_or_area_label,
             notes=notes,
@@ -65,8 +76,24 @@ class ProofService:
         )
         self.session.add(proof)
 
-        logger.info("proof.uploaded request_id=%s photo_id=%s user_id=%s cid=%s content_type=%s", request_id, photo.id, user_id, cid, content_type)
-        return {"id": photo.id, "cid": cid, "sequence": seq, "validation_status": "pending"}
+        logger.info(
+            "proof.uploaded request_id=%s photo_id=%s user_id=%s cid=%s provider=%s content_type=%s",
+            request_id,
+            photo.id,
+            user_id,
+            cid,
+            upload_result.provider,
+            content_type,
+        )
+        return {
+            "id": photo.id,
+            "cid": cid,
+            "sequence": seq,
+            "validation_status": "pending",
+            "storage_url": upload_result.storage_url,
+            "gateway_url": upload_result.gateway_url,
+            "storage_provider": upload_result.provider,
+        }
 
     async def mark_uploaded(self, request_id: int, count: int) -> None:
         now = self.now_iso()

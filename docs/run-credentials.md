@@ -68,6 +68,25 @@ HEDERA_HCS_REQUIRE_REAL=true
 
 Strict mode fails fast if the operator credentials or topic ID are missing.
 
+## Optional for IPFS proof storage
+
+```bash
+PINATA_JWT=<pinata-jwt>
+PINATA_GATEWAY_URL=https://gateway.pinata.cloud
+PINATA_API_URL=https://api.pinata.cloud/pinning/pinFileToIPFS
+```
+
+Without `PINATA_JWT`, proof uploads use a local deterministic CID and still
+return `ipfs://<cid>` metadata while keeping a local file cache for AI review.
+
+For production-like E2E, require real Pinata/IPFS uploads:
+
+```bash
+IPFS_REQUIRE_REAL=true
+```
+
+Strict mode fails fast if `PINATA_JWT` is missing.
+
 ## Optional for x402 payment metadata
 
 ```bash

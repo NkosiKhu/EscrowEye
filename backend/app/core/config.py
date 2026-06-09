@@ -74,6 +74,22 @@ class Settings:
         return os.getenv("HEDERA_HCS_REQUIRE_REAL", "").lower() in {"1", "true", "yes", "on"}
 
     @property
+    def IPFS_REQUIRE_REAL(self) -> bool:
+        return os.getenv("IPFS_REQUIRE_REAL", "").lower() in {"1", "true", "yes", "on"}
+
+    @property
+    def PINATA_JWT(self) -> str | None:
+        return os.getenv("PINATA_JWT")
+
+    @property
+    def PINATA_API_URL(self) -> str:
+        return os.getenv("PINATA_API_URL", "https://api.pinata.cloud/pinning/pinFileToIPFS")
+
+    @property
+    def PINATA_GATEWAY_URL(self) -> str:
+        return os.getenv("PINATA_GATEWAY_URL", "https://gateway.pinata.cloud")
+
+    @property
     def X402_REQUIRE_REAL(self) -> bool:
         return os.getenv("X402_REQUIRE_REAL", "").lower() in {"1", "true", "yes", "on"}
 
