@@ -4,23 +4,15 @@ import os
 from pathlib import Path
 
 import pytest
-from fastapi.testclient import TestClient
 
-from app import main
+from tests.conftest import auth, make_client
 
 
 OWNER_WALLET = os.getenv("ESCROWEYE_E2E_OWNER_WALLET", "0.0.910001")
 SUPPLIER_WALLET = os.getenv("ESCROWEYE_E2E_SUPPLIER_WALLET", "0.0.920001")
 
 
-def make_client(tmp_path: Path) -> TestClient:
-    main.DB_PATH = tmp_path / "escroweye-e2e.sqlite3"
-    main.UPLOAD_DIR = tmp_path / "uploads"
-    main.init_db()
-    return TestClient(main.app)
-
-
-def wallet_login(client: TestClient, wallet: str, role: str) -> str:
+def wallet_login(client, wallet: str, role: str) -> str:
     challenge = client.post("/api/auth/challenge", json={"hedera_account_id": wallet})
     assert challenge.status_code == 200
     nonce = challenge.json()["nonce"]
@@ -38,10 +30,6 @@ def wallet_login(client: TestClient, wallet: str, role: str) -> str:
     assert login.json()["user"]["hedera_account_id"] == wallet
     assert login.json()["user"]["user_type"] == role
     return login.json()["token"]
-
-
-def auth(token: str) -> dict[str, str]:
-    return {"Authorization": f"Bearer {token}"}
 
 
 @pytest.mark.e2e

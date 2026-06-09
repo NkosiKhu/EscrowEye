@@ -27,7 +27,6 @@ class ProfilePatch(BaseModel):
 def create_auth_router(
     *,
     db: Callable,
-    one: Callable,
     now_iso: Callable[[], str],
     token_for: Callable[[int], str],
     current_user: Callable,
@@ -35,26 +34,26 @@ def create_auth_router(
 ) -> APIRouter:
     router = APIRouter(prefix="/api/auth", tags=["auth"])
 
-    def service(conn) -> AuthService:
-        return AuthService(conn, one=one, now_iso=now_iso, token_for=token_for, public_user=public_user)
-
     @router.post("/challenge")
-    def challenge(body: ChallengeIn):
-        with db() as conn:
-            return service(conn).challenge(body.hedera_account_id)
+    async def challenge(body: ChallengeIn):
+        async with db() as session:
+            service = AuthService(session, now_iso=now_iso, token_for=token_for, public_user=public_user)
+            return await service.challenge(body.hedera_account_id)
 
     @router.post("/login")
-    def login(body: LoginIn):
-        with db() as conn:
-            return service(conn).login(body)
+    async def login(body: LoginIn):
+        async with db() as session:
+            service = AuthService(session, now_iso=now_iso, token_for=token_for, public_user=public_user)
+            return await service.login(body)
 
     @router.get("/me")
-    def me(user: dict[str, Any] = Depends(current_user)):
+    async def me(user: dict[str, Any] = Depends(current_user)):
         return public_user(user)
 
     @router.patch("/profile")
-    def profile(body: ProfilePatch, user: dict[str, Any] = Depends(current_user)):
-        with db() as conn:
-            return service(conn).update_profile_email(body.email, user)
+    async def profile(body: ProfilePatch, user: dict[str, Any] = Depends(current_user)):
+        async with db() as session:
+            service = AuthService(session, now_iso=now_iso, token_for=token_for, public_user=public_user)
+            return await service.update_profile_email(body.email, user)
 
     return router

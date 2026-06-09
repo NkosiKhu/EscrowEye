@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 from app import main
 from app.infrastructure.hcs_service import HCSConfigurationError, HCSResult, HCSService
 from app.infrastructure.x402_service import X402ConfigurationError, X402Service
+from tests.conftest import make_client
 
 
 def test_hcs_real_mode_requires_credentials(monkeypatch) -> None:
@@ -79,10 +80,7 @@ def test_x402_real_mode_authorizes_through_facilitator(monkeypatch) -> None:
 def test_service_request_rejects_unverified_x402_in_real_mode(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("X402_REQUIRE_REAL", "true")
     monkeypatch.delenv("X402_FACILITATOR_URL", raising=False)
-    main.DB_PATH = tmp_path / "escroweye-x402-real.sqlite3"
-    main.UPLOAD_DIR = tmp_path / "uploads"
-    main.init_db()
-    client = TestClient(main.app)
+    client = make_client(tmp_path)
 
     challenge = client.post("/api/auth/challenge", json={"hedera_account_id": "0.0.7001"})
     token = client.post(

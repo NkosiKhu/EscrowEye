@@ -51,7 +51,6 @@ class PhotoPatch(BaseModel):
 def create_jobs_router(
     *,
     db: Callable,
-    one: Callable,
     now_iso: Callable[[], str],
     current_user: Callable,
     public_user: Callable,
@@ -64,10 +63,9 @@ def create_jobs_router(
 ) -> APIRouter:
     router = APIRouter(prefix="/api", tags=["jobs"])
 
-    def service(conn) -> JobService:
+    def service(session) -> JobService:
         return JobService(
-            conn,
-            one=one,
+            session,
             now_iso=now_iso,
             public_user=public_user,
             add_audit=add_audit,
@@ -78,12 +76,12 @@ def create_jobs_router(
         )
 
     @router.get("/jobs")
-    def list_jobs(status: str | None = None, role: str | None = None, user: dict[str, Any] = Depends(current_user)):
-        with db() as conn:
-            return service(conn).list_jobs(status, role, user)
+    async def list_jobs(status: str | None = None, role: str | None = None, user: dict[str, Any] = Depends(current_user)):
+        async with db() as session:
+            return await service(session).list_jobs(status, role, user)
 
     @router.post("/jobs", status_code=201)
-    def create_job(
+    async def create_job(
         body: JobIn,
         request: Request,
         x_payment: str | None = Header(default=None),
@@ -100,74 +98,74 @@ def create_jobs_router(
             )
         if not payment.get("valid"):
             return JSONResponse(status_code=402, content={"error": "payment_required", "payment_requirements": x402_service.payment_requirements()})
-        with db() as conn:
-            return service(conn).create_job(body, user)
+        async with db() as session:
+            return await service(session).create_job(body, user)
 
     @router.get("/jobs/{job_id}")
-    def get_job(job_id: int, user: dict[str, Any] = Depends(current_user)):
+    async def get_job(job_id: int, user: dict[str, Any] = Depends(current_user)):
         _ = user
-        with db() as conn:
-            return service(conn).job_detail(job_id)
+        async with db() as session:
+            return await service(session).job_detail(job_id)
 
     @router.get("/jobs/{job_id}/bids")
-    def list_bids(job_id: int, user: dict[str, Any] = Depends(current_user)):
+    async def list_bids(job_id: int, user: dict[str, Any] = Depends(current_user)):
         _ = user
-        with db() as conn:
-            return service(conn).list_bids(job_id)
+        async with db() as session:
+            return await service(session).list_bids(job_id)
 
     @router.post("/jobs/{job_id}/bids")
-    def create_bid(job_id: int, body: BidIn, user: dict[str, Any] = Depends(current_user)):
-        with db() as conn:
-            return service(conn).create_bid(job_id, body, user)
+    async def create_bid(job_id: int, body: BidIn, user: dict[str, Any] = Depends(current_user)):
+        async with db() as session:
+            return await service(session).create_bid(job_id, body, user)
 
     @router.put("/bids/{bid_id}")
-    def update_bid(bid_id: int, body: BidIn, user: dict[str, Any] = Depends(current_user)):
-        with db() as conn:
-            return service(conn).update_bid(bid_id, body, user)
+    async def update_bid(bid_id: int, body: BidIn, user: dict[str, Any] = Depends(current_user)):
+        async with db() as session:
+            return await service(session).update_bid(bid_id, body, user)
 
     @router.delete("/bids/{bid_id}", status_code=204)
-    def delete_bid(bid_id: int, user: dict[str, Any] = Depends(current_user)):
-        with db() as conn:
-            service(conn).delete_bid(bid_id, user)
+    async def delete_bid(bid_id: int, user: dict[str, Any] = Depends(current_user)):
+        async with db() as session:
+            await service(session).delete_bid(bid_id, user)
         return Response(status_code=204)
 
     @router.post("/jobs/{job_id}/award")
-    def award_job(job_id: int, body: AwardIn, user: dict[str, Any] = Depends(current_user)):
-        with db() as conn:
-            return service(conn).award_job(job_id, body.bid_id, user)
+    async def award_job(job_id: int, body: AwardIn, user: dict[str, Any] = Depends(current_user)):
+        async with db() as session:
+            return await service(session).award_job(job_id, body.bid_id, user)
 
     @router.post("/jobs/{job_id}/fund")
-    def fund_job(job_id: int, body: dict[str, Any], user: dict[str, Any] = Depends(current_user)):
+    async def fund_job(job_id: int, body: dict[str, Any], user: dict[str, Any] = Depends(current_user)):
         _ = body
-        with db() as conn:
-            return service(conn).fund_job(job_id, user)
+        async with db() as session:
+            return await service(session).fund_job(job_id, user)
 
     @router.post("/jobs/{job_id}/mark-ready")
-    def mark_ready(job_id: int, body: ReadyIn, user: dict[str, Any] = Depends(current_user)):
-        with db() as conn:
-            return service(conn).mark_ready(job_id, body.message, user)
+    async def mark_ready(job_id: int, body: ReadyIn, user: dict[str, Any] = Depends(current_user)):
+        async with db() as session:
+            return await service(session).mark_ready(job_id, body.message, user)
 
     @router.post("/jobs/{job_id}/confirm")
-    def confirm_job(job_id: int, body: dict[str, Any], user: dict[str, Any] = Depends(current_user)):
+    async def confirm_job(job_id: int, body: dict[str, Any], user: dict[str, Any] = Depends(current_user)):
         _ = body
-        with db() as conn:
-            return service(conn).confirm_job(job_id, user)
+        async with db() as session:
+            return await service(session).confirm_job(job_id, user)
 
     @router.post("/jobs/{job_id}/dispute")
-    def dispute_job(job_id: int, body: DisputeIn, user: dict[str, Any] = Depends(current_user)):
-        with db() as conn:
-            return service(conn).dispute_job(job_id, body.reason, user)
+    async def dispute_job(job_id: int, body: DisputeIn, user: dict[str, Any] = Depends(current_user)):
+        async with db() as session:
+            return await service(session).dispute_job(job_id, body.reason, user)
 
     @router.get("/jobs/{job_id}/messages")
-    def list_messages(job_id: int, user: dict[str, Any] = Depends(current_user)):
+    async def list_messages(job_id: int, user: dict[str, Any] = Depends(current_user)):
         _ = user
-        with db() as conn:
-            return service(conn).list_messages(job_id)
+        async with db() as session:
+            return await service(session).list_messages(job_id)
 
     @router.post("/jobs/{job_id}/messages")
-    def create_message(job_id: int, body: MessageIn, user: dict[str, Any] = Depends(current_user)):
-        with db() as conn:
-            return service(conn).create_message(job_id, body.body, body.photo_ids, user)
+    async def create_message(job_id: int, body: MessageIn, user: dict[str, Any] = Depends(current_user)):
+        async with db() as session:
+            return await service(session).create_message(job_id, body.body, body.photo_ids, user)
 
     @router.post("/jobs/{job_id}/photos")
     async def upload_photos(
@@ -178,11 +176,11 @@ def create_jobs_router(
         user: dict[str, Any] = Depends(current_user),
     ):
         results = []
-        with db() as conn:
-            job_service = service(conn)
+        async with db() as session:
+            job_service = service(session)
             for upload in photos:
                 results.append(
-                    job_service.create_photo_record(
+                    await job_service.create_photo_record(
                         job_id,
                         room_id,
                         user["id"],
@@ -195,21 +193,21 @@ def create_jobs_router(
         return {"photos": results}
 
     @router.get("/jobs/{job_id}/photos")
-    def list_photos(job_id: int, user: dict[str, Any] = Depends(current_user)):
+    async def list_photos(job_id: int, user: dict[str, Any] = Depends(current_user)):
         _ = user
-        with db() as conn:
-            return service(conn).list_photos(job_id)
+        async with db() as session:
+            return await service(session).list_photos(job_id)
 
     @router.patch("/jobs/{job_id}/photos/{photo_id}")
-    def patch_photo(job_id: int, photo_id: int, body: PhotoPatch, user: dict[str, Any] = Depends(current_user)):
+    async def patch_photo(job_id: int, photo_id: int, body: PhotoPatch, user: dict[str, Any] = Depends(current_user)):
         _ = user
-        with db() as conn:
-            return service(conn).patch_photo(job_id, photo_id, body)
+        async with db() as session:
+            return await service(session).patch_photo(job_id, photo_id, body)
 
     @router.get("/jobs/{job_id}/audit-events")
-    def audit_events(job_id: int, user: dict[str, Any] = Depends(current_user)):
+    async def audit_events(job_id: int, user: dict[str, Any] = Depends(current_user)):
         _ = user
-        with db() as conn:
-            return service(conn).audit_events(job_id)
+        async with db() as session:
+            return await service(session).audit_events(job_id)
 
     return router

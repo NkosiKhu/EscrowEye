@@ -11,22 +11,22 @@ def create_earnings_router(*, db: Callable, current_user: Callable) -> APIRouter
     router = APIRouter(prefix="/api", tags=["earnings"])
 
     @router.get("/supplier/earnings")
-    def supplier_earnings(user: dict[str, Any] = Depends(current_user)):
-        with db() as conn:
-            return marketplace_service.supplier_earnings(conn, user)
+    async def supplier_earnings(user: dict[str, Any] = Depends(current_user)):
+        async with db() as session:
+            return await marketplace_service.supplier_earnings(session, user)
 
     @router.get("/supplier/transactions")
-    def supplier_transactions(user: dict[str, Any] = Depends(current_user)):
-        with db() as conn:
-            return marketplace_service.supplier_transactions(conn, user)
+    async def supplier_transactions(user: dict[str, Any] = Depends(current_user)):
+        async with db() as session:
+            return await marketplace_service.supplier_transactions(session, user)
 
     @router.get("/owner/payments")
-    def owner_payments(user: dict[str, Any] = Depends(current_user)):
-        with db() as conn:
-            return marketplace_service.owner_payments(conn, user)
+    async def owner_payments(user: dict[str, Any] = Depends(current_user)):
+        async with db() as session:
+            return await marketplace_service.owner_payments(session, user)
 
     @router.get("/owner/transactions")
-    def owner_transactions(user: dict[str, Any] = Depends(current_user)):
-        return owner_payments(user)
+    async def owner_transactions(user: dict[str, Any] = Depends(current_user)):
+        return await owner_payments(user)
 
     return router

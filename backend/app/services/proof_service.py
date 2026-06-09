@@ -1,10 +1,14 @@
 from __future__ import annotations
 
-import sqlite3
 from pathlib import Path
 from typing import Any, Callable
 
+from fastapi import HTTPException
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.core.logging import get_logger
+from app.infrastructure.models import Job, Photo, ProofUpload, Room
 from app.services import marketplace as marketplace_service
 
 
@@ -12,74 +16,105 @@ logger = get_logger("escroweye.proof")
 
 
 class ProofService:
-    def __init__(self, conn: sqlite3.Connection, *, one: Callable, now_iso: Callable[[], str], upload_dir: Path):
-        self.conn = conn
-        self.one = one
+    def __init__(self, session: AsyncSession, *, now_iso: Callable[[], str], upload_dir: Path):
+        self.session = session
         self.now_iso = now_iso
         self.upload_dir = upload_dir
 
-    def create_proof_record(self, request_id: int, user_id: int, content: bytes, filename: str, content_type: str | None, room_or_area_label: str | None, notes: str | None) -> dict[str, Any]:
-        self.one(self.conn, "SELECT id FROM jobs WHERE id = ?", (request_id,))
-        seq = self.conn.execute("SELECT COALESCE(MAX(sequence), 0) FROM photos WHERE job_id = ?", (request_id,)).fetchone()[0] + 1
+    async def create_proof_record(self, request_id: int, user_id: int, content: bytes, filename: str, content_type: str | None, room_or_area_label: str | None, notes: str | None) -> dict[str, Any]:
+        result = await self.session.execute(select(Job).where(Job.id == request_id))
+        result.scalar_one_or_none()
+        seq_result = await self.session.execute(
+            select(func.coalesce(func.max(Photo.sequence), 0)).where(Photo.job_id == request_id)
+        )
+        seq = (seq_result.scalar() or 0) + 1
         cid = marketplace_service.mock_cid(content, filename)
         suffix = Path(filename or "proof.bin").suffix or ".bin"
         storage_path = self.upload_dir / f"request-{request_id}-proof-{seq}-{cid[:16]}{suffix}"
         storage_path.write_bytes(content)
-        cur = self.conn.execute(
-            """
-            INSERT INTO photos (
-                job_id, room_id, uploaded_by_user_id, cid, filename, content_type, storage_path,
-                sequence, review_status, review_notes, encrypted_keys, created_at
-            ) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, 'pending', ?, '{}', ?)
-            """,
-            (request_id, user_id, cid, filename or storage_path.name, content_type, str(storage_path), seq, notes or room_or_area_label, self.now_iso()),
+        now = self.now_iso()
+
+        photo = Photo(
+            job_id=request_id,
+            room_id=None,
+            uploaded_by_user_id=user_id,
+            cid=cid,
+            filename=filename or storage_path.name,
+            content_type=content_type,
+            storage_path=str(storage_path),
+            sequence=seq,
+            review_status="pending",
+            review_notes=notes or room_or_area_label,
+            encrypted_keys="{}",
+            created_at=now,
         )
-        self.conn.execute(
-            """
-            INSERT INTO proof_uploads (
-                job_id, photo_id, uploaded_by_user_id, file_type, storage_url, cid,
-                room_or_area_label, notes, validation_status, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
-            """,
-            (
-                request_id,
-                cur.lastrowid,
-                user_id,
-                "video" if (content_type or "").startswith("video/") else "image",
-                str(storage_path),
-                cid,
-                room_or_area_label,
-                notes,
-                self.now_iso(),
-            ),
+        self.session.add(photo)
+        await self.session.flush()
+
+        proof = ProofUpload(
+            job_id=request_id,
+            photo_id=photo.id,
+            uploaded_by_user_id=user_id,
+            file_type="video" if (content_type or "").startswith("video/") else "image",
+            storage_url=str(storage_path),
+            cid=cid,
+            room_or_area_label=room_or_area_label,
+            notes=notes,
+            validation_status="pending",
+            created_at=now,
         )
-        logger.info("proof.uploaded request_id=%s photo_id=%s user_id=%s cid=%s content_type=%s", request_id, cur.lastrowid, user_id, cid, content_type)
-        return {"id": cur.lastrowid, "cid": cid, "sequence": seq, "validation_status": "pending"}
+        self.session.add(proof)
 
-    def mark_uploaded(self, request_id: int, count: int) -> None:
-        self.conn.execute("UPDATE jobs SET status = 'proof_uploaded', updated_at = ? WHERE id = ?", (self.now_iso(), request_id))
-        marketplace_service.add_local_audit(self.conn, request_id, "proof_uploaded", {"count": count})
+        logger.info("proof.uploaded request_id=%s photo_id=%s user_id=%s cid=%s content_type=%s", request_id, photo.id, user_id, cid, content_type)
+        return {"id": photo.id, "cid": cid, "sequence": seq, "validation_status": "pending"}
 
-    def list_proof(self, request_id: int) -> dict[str, Any]:
-        rows = self.conn.execute("SELECT * FROM proof_uploads WHERE job_id = ? ORDER BY id", (request_id,)).fetchall()
-        return {"proof": [dict(row) for row in rows]}
+    async def mark_uploaded(self, request_id: int, count: int) -> None:
+        now = self.now_iso()
+        result = await self.session.execute(select(Job).where(Job.id == request_id))
+        job = result.scalar_one_or_none()
+        if job is not None:
+            job.status = "proof_uploaded"
+            job.updated_at = now
+        await marketplace_service.add_local_audit(self.session, request_id, "proof_uploaded", {"count": count})
 
-    def update_proof(self, request_id: int, proof_id: int, body: Any) -> dict[str, Any]:
-        proof = self.one(self.conn, "SELECT * FROM proof_uploads WHERE id = ? AND job_id = ?", (proof_id, request_id))
+    async def list_proof(self, request_id: int) -> dict[str, Any]:
+        result = await self.session.execute(
+            select(ProofUpload).where(ProofUpload.job_id == request_id).order_by(ProofUpload.id)
+        )
+        rows = result.scalars().all()
+        return {"proof": [{c.name: getattr(r, c.name) for c in ProofUpload.__table__.columns} for r in rows]}
+
+    async def update_proof(self, request_id: int, proof_id: int, body: Any) -> dict[str, Any]:
+        result = await self.session.execute(
+            select(ProofUpload).where(ProofUpload.id == proof_id, ProofUpload.job_id == request_id)
+        )
+        proof = result.scalar_one_or_none()
+        if proof is None:
+            raise HTTPException(status_code=404, detail="not_found")
         if body.room_id is not None:
-            self.one(self.conn, "SELECT id FROM rooms WHERE id = ?", (body.room_id,))
-        self.conn.execute(
-            """
-            UPDATE photos
-            SET room_id = COALESCE(?, room_id),
-                review_status = COALESCE(?, review_status),
-                review_notes = COALESCE(?, review_notes)
-            WHERE id = ?
-            """,
-            (body.room_id, body.review_status, body.review_notes, proof["photo_id"]),
-        )
+            room_result = await self.session.execute(select(Room).where(Room.id == body.room_id))
+            room_result.scalar_one_or_none()
+        photo_result = await self.session.execute(select(Photo).where(Photo.id == proof.photo_id))
+        photo = photo_result.scalar_one_or_none()
+        if photo is not None:
+            if body.room_id is not None:
+                photo.room_id = body.room_id
+            if body.review_status is not None:
+                photo.review_status = body.review_status
+            if body.review_notes is not None:
+                photo.review_notes = body.review_notes
         if body.review_status is not None:
-            self.conn.execute("UPDATE proof_uploads SET validation_status = ? WHERE id = ?", (body.review_status, proof_id))
-        photo = self.one(self.conn, "SELECT * FROM photos WHERE id = ?", (proof["photo_id"],))
-        room = self.conn.execute("SELECT id, name FROM rooms WHERE id = ?", (photo["room_id"],)).fetchone() if photo["room_id"] else None
-        return {"id": proof_id, "photo_id": proof["photo_id"], "job_id": request_id, "room": dict(room) if room else None, "review_status": photo["review_status"], "review_notes": photo["review_notes"]}
+            proof.validation_status = body.review_status
+        room = None
+        if photo is not None and photo.room_id is not None:
+            room_result = await self.session.execute(select(Room).where(Room.id == photo.room_id))
+            room_row = room_result.scalar_one_or_none()
+            room = {"id": room_row.id, "name": room_row.name} if room_row else None
+        return {
+            "id": proof_id,
+            "photo_id": proof.photo_id,
+            "job_id": request_id,
+            "room": room,
+            "review_status": photo.review_status if photo else None,
+            "review_notes": photo.review_notes if photo else None,
+        }

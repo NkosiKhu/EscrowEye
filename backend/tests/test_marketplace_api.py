@@ -2,38 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi.testclient import TestClient
-
-from app import main
-
-
-def make_client(tmp_path: Path) -> TestClient:
-    main.DB_PATH = tmp_path / "escroweye-test.sqlite3"
-    main.UPLOAD_DIR = tmp_path / "uploads"
-    main.init_db()
-    return TestClient(main.app)
-
-
-def login(client: TestClient, account: str, role: str) -> str:
-    challenge = client.post("/api/auth/challenge", json={"hedera_account_id": account})
-    assert challenge.status_code == 200
-    nonce = challenge.json()["nonce"]
-    response = client.post(
-        "/api/auth/login",
-        json={
-            "hedera_account_id": account,
-            "hedera_public_key": f"pub-{account}",
-            "signature": f"sig-{nonce}",
-            "nonce": nonce,
-            "user_type": role,
-        },
-    )
-    assert response.status_code == 200
-    return response.json()["token"]
-
-
-def auth(token: str) -> dict[str, str]:
-    return {"Authorization": f"Bearer {token}"}
+from tests.conftest import auth, login, make_client
 
 
 def test_service_categories_and_workers_are_open_for_marketplace(tmp_path: Path) -> None:

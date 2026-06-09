@@ -38,7 +38,6 @@ class MessageCreateIn(BaseModel):
 def create_service_requests_router(
     *,
     db: Callable,
-    one: Callable,
     now_iso: Callable[[], str],
     current_user: Callable,
     public_user: Callable,
@@ -47,18 +46,18 @@ def create_service_requests_router(
     router = APIRouter(prefix="/api", tags=["service-requests"])
 
     @router.post("/onboarding/role")
-    def onboarding_role(body: dict[str, str], user: dict[str, Any] = Depends(current_user)):
-        with db() as conn:
-            return marketplace_service.set_user_role(conn, user, body.get("role", ""))
+    async def onboarding_role(body: dict[str, str], user: dict[str, Any] = Depends(current_user)):
+        async with db() as session:
+            return await marketplace_service.set_user_role(session, user, body.get("role", ""))
 
     @router.post("/profile/setup")
     @router.patch("/profile")
-    def setup_profile(body: ProfileSetupIn, user: dict[str, Any] = Depends(current_user)):
-        with db() as conn:
-            return marketplace_service.setup_profile(conn, body, user, public_user)
+    async def setup_profile(body: ProfileSetupIn, user: dict[str, Any] = Depends(current_user)):
+        async with db() as session:
+            return await marketplace_service.setup_profile(session, body, user, public_user)
 
     @router.post("/service-requests", status_code=201)
-    def create_service_request(
+    async def create_service_request(
         body: ServiceRequestIn,
         request: Request,
         x_payment: str | None = Header(default=None),
@@ -75,78 +74,78 @@ def create_service_requests_router(
             )
         if not payment.get("valid"):
             return JSONResponse(status_code=402, content={"error": "payment_required", "payment_requirements": x402_service.payment_requirements()})
-        with db() as conn:
-            return marketplace_service.create_request(conn, body, user)
+        async with db() as session:
+            return await marketplace_service.create_request(session, body, user)
 
     @router.get("/service-requests")
-    def list_service_requests(user: dict[str, Any] = Depends(current_user)):
-        with db() as conn:
-            return marketplace_service.list_service_requests(conn, user)
+    async def list_service_requests(user: dict[str, Any] = Depends(current_user)):
+        async with db() as session:
+            return await marketplace_service.list_service_requests(session, user)
 
     @router.get("/service-requests/{request_id}")
-    def get_service_request(request_id: int, user: dict[str, Any] = Depends(current_user)):
+    async def get_service_request(request_id: int, user: dict[str, Any] = Depends(current_user)):
         _ = user
-        with db() as conn:
-            return marketplace_service.get_service_request(conn, request_id)
+        async with db() as session:
+            return await marketplace_service.get_service_request(session, request_id)
 
     @router.patch("/service-requests/{request_id}")
-    def update_service_request(request_id: int, body: ServiceRequestIn, user: dict[str, Any] = Depends(current_user)):
-        with db() as conn:
-            return marketplace_service.update_service_request(conn, request_id, body, user)
+    async def update_service_request(request_id: int, body: ServiceRequestIn, user: dict[str, Any] = Depends(current_user)):
+        async with db() as session:
+            return await marketplace_service.update_service_request(session, request_id, body, user)
 
     @router.post("/service-requests/{request_id}/cancel")
-    def cancel_service_request(request_id: int, user: dict[str, Any] = Depends(current_user)):
-        with db() as conn:
-            return marketplace_service.cancel_service_request(conn, request_id, user)
+    async def cancel_service_request(request_id: int, user: dict[str, Any] = Depends(current_user)):
+        async with db() as session:
+            return await marketplace_service.cancel_service_request(session, request_id, user)
 
     @router.get("/supplier/jobs/offers")
-    def supplier_job_offers(user: dict[str, Any] = Depends(current_user)):
+    async def supplier_job_offers(user: dict[str, Any] = Depends(current_user)):
         marketplace_service.require_role(user, "supplier")
-        with db() as conn:
-            return {"jobs": marketplace_service.supplier_jobs(conn, user, "offers")}
+        async with db() as session:
+            return {"jobs": await marketplace_service.supplier_jobs(session, user, "offers")}
 
     @router.get("/supplier/jobs/active")
-    def supplier_job_active(user: dict[str, Any] = Depends(current_user)):
+    async def supplier_job_active(user: dict[str, Any] = Depends(current_user)):
         marketplace_service.require_role(user, "supplier")
-        with db() as conn:
-            return {"jobs": marketplace_service.supplier_jobs(conn, user, "active")}
+        async with db() as session:
+            return {"jobs": await marketplace_service.supplier_jobs(session, user, "active")}
 
     @router.get("/supplier/jobs/archived")
-    def supplier_job_archived(user: dict[str, Any] = Depends(current_user)):
+    async def supplier_job_archived(user: dict[str, Any] = Depends(current_user)):
         marketplace_service.require_role(user, "supplier")
-        with db() as conn:
-            return {"jobs": marketplace_service.supplier_jobs(conn, user, "archived")}
+        async with db() as session:
+            return {"jobs": await marketplace_service.supplier_jobs(session, user, "archived")}
 
     @router.post("/supplier/jobs/{job_id}/accept")
-    def supplier_accept_job(job_id: int, user: dict[str, Any] = Depends(current_user)):
-        with db() as conn:
-            return marketplace_service.supplier_accept_job(conn, job_id, user)
+    async def supplier_accept_job(job_id: int, user: dict[str, Any] = Depends(current_user)):
+        async with db() as session:
+            return await marketplace_service.supplier_accept_job(session, job_id, user)
 
     @router.post("/supplier/jobs/{job_id}/mark-processing")
-    def supplier_mark_processing(job_id: int, user: dict[str, Any] = Depends(current_user)):
-        with db() as conn:
-            return marketplace_service.supplier_mark_processing(conn, job_id, user)
+    async def supplier_mark_processing(job_id: int, user: dict[str, Any] = Depends(current_user)):
+        async with db() as session:
+            return await marketplace_service.supplier_mark_processing(session, job_id, user)
 
     @router.post("/supplier/jobs/{job_id}/mark-complete")
-    def supplier_mark_complete(job_id: int, user: dict[str, Any] = Depends(current_user)):
-        with db() as conn:
-            return marketplace_service.supplier_mark_complete(conn, job_id, user)
+    async def supplier_mark_complete(job_id: int, user: dict[str, Any] = Depends(current_user)):
+        async with db() as session:
+            return await marketplace_service.supplier_mark_complete(session, job_id, user)
 
     @router.get("/service-requests/{request_id}/messages")
-    def list_service_messages(request_id: int, user: dict[str, Any] = Depends(current_user)):
+    async def list_service_messages(request_id: int, user: dict[str, Any] = Depends(current_user)):
         _ = user
-        with db() as conn:
-            return marketplace_service.list_service_messages(conn, request_id)
+        async with db() as session:
+            return await marketplace_service.list_service_messages(session, request_id)
 
     @router.post("/service-requests/{request_id}/messages")
-    def create_service_message(request_id: int, body: MessageCreateIn, user: dict[str, Any] = Depends(current_user)):
-        with db() as conn:
-            return marketplace_service.create_service_message(conn, request_id, body, user)
+    async def create_service_message(request_id: int, body: MessageCreateIn, user: dict[str, Any] = Depends(current_user)):
+        async with db() as session:
+            return await marketplace_service.create_service_message(session, request_id, body, user)
 
     @router.post("/demo/seed")
-    def seed_demo(user: dict[str, Any] = Depends(current_user)):
+    async def seed_demo(user: dict[str, Any] = Depends(current_user)):
         _ = user
-        with db() as conn:
-            return seed_demo_data(conn)
+        async with db() as session:
+            return await seed_demo_data(session)
 
     return router

@@ -3,21 +3,13 @@ from __future__ import annotations
 from pathlib import Path
 
 from cryptography.hazmat.primitives.asymmetric import ed25519
-from fastapi.testclient import TestClient
 
-from app import main
-
-
-def make_client(tmp_path: Path, monkeypatch) -> TestClient:
-    monkeypatch.setenv("ESCROWEYE_AUTH_REQUIRE_SIGNATURE", "true")
-    main.DB_PATH = tmp_path / "escroweye-auth-signature.sqlite3"
-    main.UPLOAD_DIR = tmp_path / "uploads"
-    main.init_db()
-    return TestClient(main.app)
+from tests.conftest import make_client
 
 
 def test_login_requires_valid_ed25519_signature(tmp_path: Path, monkeypatch) -> None:
-    client = make_client(tmp_path, monkeypatch)
+    monkeypatch.setenv("ESCROWEYE_AUTH_REQUIRE_SIGNATURE", "true")
+    client = make_client(tmp_path)
     private_key = ed25519.Ed25519PrivateKey.generate()
     public_key = private_key.public_key().public_bytes_raw().hex()
 
@@ -41,7 +33,8 @@ def test_login_requires_valid_ed25519_signature(tmp_path: Path, monkeypatch) -> 
 
 
 def test_login_rejects_invalid_signature_when_required(tmp_path: Path, monkeypatch) -> None:
-    client = make_client(tmp_path, monkeypatch)
+    monkeypatch.setenv("ESCROWEYE_AUTH_REQUIRE_SIGNATURE", "true")
+    client = make_client(tmp_path)
     private_key = ed25519.Ed25519PrivateKey.generate()
     other_key = ed25519.Ed25519PrivateKey.generate()
     public_key = private_key.public_key().public_bytes_raw().hex()

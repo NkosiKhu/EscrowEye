@@ -18,15 +18,14 @@ class ProofPatch(BaseModel):
 def create_proof_router(
     *,
     db: Callable,
-    one: Callable,
     now_iso: Callable[[], str],
     current_user: Callable,
     upload_dir: Path,
 ) -> APIRouter:
     router = APIRouter(prefix="/api", tags=["proof"])
 
-    def service(conn) -> ProofService:
-        return ProofService(conn, one=one, now_iso=now_iso, upload_dir=upload_dir)
+    def service(session) -> ProofService:
+        return ProofService(session, now_iso=now_iso, upload_dir=upload_dir)
 
     @router.post("/service-requests/{request_id}/proof", status_code=201)
     async def upload_service_proof(
@@ -38,11 +37,11 @@ def create_proof_router(
     ):
         results = []
         upload_dir.mkdir(parents=True, exist_ok=True)
-        with db() as conn:
-            proof_service = service(conn)
+        async with db() as session:
+            proof_service = service(session)
             for upload in files:
                 results.append(
-                    proof_service.create_proof_record(
+                    await proof_service.create_proof_record(
                         request_id,
                         user["id"],
                         await upload.read(),
@@ -52,19 +51,19 @@ def create_proof_router(
                         notes,
                     )
                 )
-            proof_service.mark_uploaded(request_id, len(results))
+            await proof_service.mark_uploaded(request_id, len(results))
         return {"proof": results}
 
     @router.get("/service-requests/{request_id}/proof")
-    def list_service_proof(request_id: int, user: dict[str, Any] = Depends(current_user)):
+    async def list_service_proof(request_id: int, user: dict[str, Any] = Depends(current_user)):
         _ = user
-        with db() as conn:
-            return service(conn).list_proof(request_id)
+        async with db() as session:
+            return await service(session).list_proof(request_id)
 
     @router.patch("/service-requests/{request_id}/proof/{proof_id}")
-    def update_service_proof(request_id: int, proof_id: int, body: ProofPatch, user: dict[str, Any] = Depends(current_user)):
+    async def update_service_proof(request_id: int, proof_id: int, body: ProofPatch, user: dict[str, Any] = Depends(current_user)):
         _ = user
-        with db() as conn:
-            return service(conn).update_proof(request_id, proof_id, body)
+        async with db() as session:
+            return await service(session).update_proof(request_id, proof_id, body)
 
     return router
