@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import HTTPException
@@ -19,8 +19,7 @@ from app.infrastructure.models import (
     Photo,
     User,
 )
-from app.services._base import add_audit, get_job, get_user, mock_cid
-
+from app.services._base import add_audit, get_job, get_user
 
 logger = get_logger("escroweye.marketplace")
 
@@ -39,22 +38,40 @@ SERVICE_CATEGORIES = [
 
 WORKERS = [
     {
-        "id": 1, "supplier_id": 1, "name": "Chijioke Nwosu", "profession": "Expert window washing",
-        "rating": 4.8, "average_rate": "From \u20a680k", "location": "Ikoyi",
+        "id": 1,
+        "supplier_id": 1,
+        "name": "Chijioke Nwosu",
+        "profession": "Expert window washing",
+        "rating": 4.8,
+        "average_rate": "From \u20a680k",
+        "location": "Ikoyi",
         "profile_image": "https://images.unsplash.com/photo-1503387762-592deb58ef4e?auto=format&fit=crop&w=500&q=80",
-        "completed_jobs": 128, "services": ["cleaning", "airbnb"],
+        "completed_jobs": 128,
+        "services": ["cleaning", "airbnb"],
     },
     {
-        "id": 2, "supplier_id": 2, "name": "Kurt Kanu", "profession": "Post-construction cleaning",
-        "rating": 5.0, "average_rate": "From \u20a6120k", "location": "Victoria Island",
+        "id": 2,
+        "supplier_id": 2,
+        "name": "Kurt Kanu",
+        "profession": "Post-construction cleaning",
+        "rating": 5.0,
+        "average_rate": "From \u20a6120k",
+        "location": "Victoria Island",
         "profile_image": "https://images.unsplash.com/photo-1580894894513-541e068a3e2b?auto=format&fit=crop&w=500&q=80",
-        "completed_jobs": 91, "services": ["cleaning", "maintenance"],
+        "completed_jobs": 91,
+        "services": ["cleaning", "maintenance"],
     },
     {
-        "id": 3, "supplier_id": 3, "name": "Favour Bello", "profession": "Airbnb turnover specialist",
-        "rating": 4.9, "average_rate": "From \u20a665k", "location": "Surulere",
+        "id": 3,
+        "supplier_id": 3,
+        "name": "Favour Bello",
+        "profession": "Airbnb turnover specialist",
+        "rating": 4.9,
+        "average_rate": "From \u20a665k",
+        "location": "Surulere",
         "profile_image": "https://images.unsplash.com/photo-1565347878134-064b9185ced8?auto=format&fit=crop&w=500&q=80",
-        "completed_jobs": 74, "services": ["airbnb", "cleaning"],
+        "completed_jobs": 74,
+        "services": ["airbnb", "cleaning"],
     },
 ]
 
@@ -109,6 +126,7 @@ async def setup_profile(session: AsyncSession, body: Any, user: dict[str, Any], 
     db_user.payment_token_preference = body.payment_token_preference
     if user["user_type"] == "supplier":
         from app.infrastructure.models import SupplierProfile
+
         sp_result = await session.execute(select(SupplierProfile).where(SupplierProfile.user_id == user["id"]))
         sp = sp_result.scalar_one_or_none()
         if sp is None:
@@ -126,24 +144,25 @@ async def setup_profile(session: AsyncSession, body: Any, user: dict[str, Any], 
             )
             session.add(sp)
     await session.flush()
-    payload = public_user({
-        "id": db_user.id, "email": db_user.email, "user_type": db_user.user_type,
-        "hedera_account_id": db_user.hedera_account_id, "hedera_public_key": db_user.hedera_public_key,
-    })
+    payload = public_user(
+        {
+            "id": db_user.id,
+            "email": db_user.email,
+            "user_type": db_user.user_type,
+            "hedera_account_id": db_user.hedera_account_id,
+            "hedera_public_key": db_user.hedera_public_key,
+        }
+    )
     payload.update(body.model_dump())
     return payload
 
 
 async def list_service_requests(session: AsyncSession, user: dict[str, Any]) -> dict[str, Any]:
     if user["user_type"] == "owner":
-        result = await session.execute(
-            select(Job).where(Job.owner_user_id == user["id"]).order_by(Job.id.desc())
-        )
+        result = await session.execute(select(Job).where(Job.owner_user_id == user["id"]).order_by(Job.id.desc()))
     else:
         result = await session.execute(
-            select(Job).where(
-                (Job.supplier_user_id == user["id"]) | Job.status.in_(["quote_requested", "quote_received"])
-            ).order_by(Job.id.desc())
+            select(Job).where((Job.supplier_user_id == user["id"]) | Job.status.in_(["quote_requested", "quote_received"])).order_by(Job.id.desc())
         )
     jobs = result.scalars().all()
     results = []
@@ -248,7 +267,7 @@ async def create_service_message(session: AsyncSession, request_id: int, body: A
         sender_user_id=user["id"],
         sender_type=body.type,
         body=body.body,
-        created_at=datetime.now(timezone.utc).isoformat(),
+        created_at=datetime.now(UTC).isoformat(),
     )
     session.add(msg)
     await session.flush()
@@ -256,9 +275,7 @@ async def create_service_message(session: AsyncSession, request_id: int, body: A
 
 
 async def list_request_quotes(session: AsyncSession, request_id: int) -> dict[str, Any]:
-    result = await session.execute(
-        select(Bid).where(Bid.job_id == request_id, Bid.status != "withdrawn").order_by(Bid.amount_tinybar)
-    )
+    result = await session.execute(select(Bid).where(Bid.job_id == request_id, Bid.status != "withdrawn").order_by(Bid.amount_tinybar))
     rows = result.scalars().all()
     results = []
     for row in rows:
@@ -330,9 +347,7 @@ async def dispute_service_request(session: AsyncSession, request_id: int, reason
 
 
 async def get_ai_validation(session: AsyncSession, request_id: int) -> dict[str, Any]:
-    result = await session.execute(
-        select(AIValidation).where(AIValidation.job_id == request_id).order_by(AIValidation.id.desc())
-    )
+    result = await session.execute(select(AIValidation).where(AIValidation.job_id == request_id).order_by(AIValidation.id.desc()))
     row = result.scalar_one_or_none()
     if row is None:
         return {"request_id": request_id, "status": "waiting_for_proof", "confidence_score": 0}
@@ -375,9 +390,7 @@ async def supplier_earnings(session: AsyncSession, user: dict[str, Any]) -> dict
 async def supplier_transactions(session: AsyncSession, user: dict[str, Any]) -> dict[str, Any]:
     require_role(user, "supplier")
     result = await session.execute(
-        select(EscrowTransaction).join(Job, Job.id == EscrowTransaction.job_id)
-        .where(Job.supplier_user_id == user["id"])
-        .order_by(EscrowTransaction.id.desc())
+        select(EscrowTransaction).join(Job, Job.id == EscrowTransaction.job_id).where(Job.supplier_user_id == user["id"]).order_by(EscrowTransaction.id.desc())
     )
     rows = result.scalars().all()
     return {"transactions": [{c.name: getattr(r, c.name) for c in EscrowTransaction.__table__.columns} for r in rows]}
@@ -386,9 +399,7 @@ async def supplier_transactions(session: AsyncSession, user: dict[str, Any]) -> 
 async def owner_payments(session: AsyncSession, user: dict[str, Any]) -> dict[str, Any]:
     require_role(user, "owner")
     result = await session.execute(
-        select(EscrowTransaction).join(Job, Job.id == EscrowTransaction.job_id)
-        .where(Job.owner_user_id == user["id"])
-        .order_by(EscrowTransaction.id.desc())
+        select(EscrowTransaction).join(Job, Job.id == EscrowTransaction.job_id).where(Job.owner_user_id == user["id"]).order_by(EscrowTransaction.id.desc())
     )
     rows = result.scalars().all()
     return {"payments": [{c.name: getattr(r, c.name) for c in EscrowTransaction.__table__.columns} for r in rows]}
@@ -396,7 +407,7 @@ async def owner_payments(session: AsyncSession, user: dict[str, Any]) -> dict[st
 
 async def create_request(session: AsyncSession, body: Any, user: dict[str, Any]) -> dict[str, Any]:
     require_role(user, "owner")
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     home = Home(
         owner_user_id=user["id"],
         name=body.title[:48],
@@ -424,7 +435,9 @@ async def create_request(session: AsyncSession, body: Any, user: dict[str, Any])
     session.add(job)
     await session.flush()
     await add_audit(session, job.id, "service_request_created", {"category": body.category})
-    logger.info("service_request.created request_id=%s owner_wallet=%s category=%s budget=%s", job.id, user["hedera_account_id"], body.category, body.budget_amount)
+    logger.info(
+        "service_request.created request_id=%s owner_wallet=%s category=%s budget=%s", job.id, user["hedera_account_id"], body.category, body.budget_amount
+    )
     return {"id": job.id, "status": JobStatus.QUOTE_REQUESTED, "hcs_topic_id": hcs_topic}
 
 
@@ -446,7 +459,7 @@ async def quote_payload(session: AsyncSession, bid: Bid) -> dict[str, Any]:
 async def create_quote(session: AsyncSession, request_id: int, body: Any, user: dict[str, Any]) -> dict[str, Any]:
     require_role(user, "supplier")
     await get_job(session, request_id)
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     bid = Bid(
         job_id=request_id,
         supplier_user_id=user["id"],
@@ -478,7 +491,7 @@ async def accept_quote(session: AsyncSession, quote_id: int, user: dict[str, Any
         raise HTTPException(status_code=404, detail="not_found")
     if job.owner_user_id != user["id"]:
         raise HTTPException(status_code=403, detail="owner_role_required")
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     bids_result = await session.execute(select(Bid).where(Bid.job_id == bid.job_id))
     for b in bids_result.scalars().all():
         b.status = "accepted" if b.id == quote_id else "rejected"
@@ -512,7 +525,7 @@ async def fund_escrow(session: AsyncSession, request_id: int, user: dict[str, An
     escrow = f"0.0.{99000 + request_id}"
     job.status = JobStatus.ESCROW_FUNDED
     job.escrow_account_id = escrow
-    job.updated_at = datetime.now(timezone.utc).isoformat()
+    job.updated_at = datetime.now(UTC).isoformat()
     await record_transaction(session, request_id, "escrow_fund", bid.amount_tinybar, "HBAR", "settled", f"local:escrow:{request_id}")
     await add_audit(session, request_id, "escrow_funded", {"amount": bid.amount_tinybar})
     logger.info("escrow.funded request_id=%s owner_wallet=%s amount=%s escrow=%s", request_id, user["hedera_account_id"], bid.amount_tinybar, escrow)
@@ -527,7 +540,7 @@ async def record_transaction(session: AsyncSession, job_id: int, tx_type: str, a
         token=token,
         status=status,
         hedera_tx_id=hedera_tx_id,
-        created_at=datetime.now(timezone.utc).isoformat(),
+        created_at=datetime.now(UTC).isoformat(),
     )
     session.add(tx)
 
@@ -535,7 +548,7 @@ async def record_transaction(session: AsyncSession, job_id: int, tx_type: str, a
 async def run_ai_validation(session: AsyncSession, request_id: int) -> dict[str, Any]:
     photo_result = await session.execute(select(Photo).where(Photo.job_id == request_id))
     photos = photo_result.scalars().all()
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     if not photos:
         status_val = AIValidationStatus.NEEDS_MORE_EVIDENCE
         confidence = 0
@@ -571,9 +584,7 @@ async def confirm_satisfaction(session: AsyncSession, request_id: int, user: dic
         raise HTTPException(status_code=404, detail="not_found")
     if job.owner_user_id != user["id"]:
         raise HTTPException(status_code=403, detail="owner_role_required")
-    validation_result = await session.execute(
-        select(AIValidation).where(AIValidation.job_id == request_id).order_by(AIValidation.id.desc())
-    )
+    validation_result = await session.execute(select(AIValidation).where(AIValidation.job_id == request_id).order_by(AIValidation.id.desc()))
     validation = validation_result.scalar_one_or_none()
     if validation is None or validation.status != AIValidationStatus.PASSED:
         raise HTTPException(status_code=409, detail="validation_not_passed")
@@ -605,9 +616,7 @@ async def release_payment(session: AsyncSession, request_id: int, user: dict[str
 
 async def supplier_jobs(session: AsyncSession, user: dict[str, Any], bucket: str) -> list[dict[str, Any]]:
     if bucket == "offers":
-        result = await session.execute(
-            select(Job).where(Job.status.in_([JobStatus.QUOTE_REQUESTED, JobStatus.QUOTE_RECEIVED])).order_by(Job.id.desc())
-        )
+        result = await session.execute(select(Job).where(Job.status.in_([JobStatus.QUOTE_REQUESTED, JobStatus.QUOTE_RECEIVED])).order_by(Job.id.desc()))
     elif bucket == "active":
         result = await session.execute(
             select(Job).where(Job.supplier_user_id == user["id"], ~Job.status.in_([JobStatus.COMPLETED, JobStatus.DISPUTED])).order_by(Job.id.desc())
@@ -638,14 +647,9 @@ async def service_request_payload(session: AsyncSession, job: Job) -> dict[str, 
     if job.supplier_user_id is not None:
         supplier_result = await session.execute(select(User).where(User.id == job.supplier_user_id))
         supplier = supplier_result.scalar_one_or_none()
-    bids_result = await session.execute(
-        select(func.count(Bid.id), func.min(Bid.amount_tinybar))
-        .where(Bid.job_id == job.id, Bid.status != "withdrawn")
-    )
+    bids_result = await session.execute(select(func.count(Bid.id), func.min(Bid.amount_tinybar)).where(Bid.job_id == job.id, Bid.status != "withdrawn"))
     bids_row = bids_result.one()
-    validation_result = await session.execute(
-        select(AIValidation.status).where(AIValidation.job_id == job.id).order_by(AIValidation.id.desc())
-    )
+    validation_result = await session.execute(select(AIValidation.status).where(AIValidation.job_id == job.id).order_by(AIValidation.id.desc()))
     validation = validation_result.scalar_one_or_none()
     return {
         "id": job.id,

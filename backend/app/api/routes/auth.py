@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+from typing import Any
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
@@ -21,7 +22,7 @@ class LoginIn(BaseModel):
 
 
 class ProfilePatch(BaseModel):
-    email: Optional[str] = None
+    email: str | None = None
 
 
 def create_auth_router(

@@ -4,7 +4,6 @@ from fastapi import APIRouter, HTTPException
 
 from app.services import marketplace as marketplace_service
 
-
 router = APIRouter(prefix="/api", tags=["workers"])
 
 

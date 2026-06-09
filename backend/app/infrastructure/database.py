@@ -11,7 +11,6 @@ from sqlalchemy.orm import DeclarativeBase
 from app.core.config import settings
 from app.core.logging import get_logger
 
-
 logger = get_logger("escroweye.database")
 
 

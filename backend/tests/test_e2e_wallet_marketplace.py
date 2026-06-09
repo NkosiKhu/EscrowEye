@@ -7,7 +7,6 @@ import pytest
 
 from tests.conftest import auth, make_client
 
-
 OWNER_WALLET = os.getenv("ESCROWEYE_E2E_OWNER_WALLET", "0.0.910001")
 SUPPLIER_WALLET = os.getenv("ESCROWEYE_E2E_SUPPLIER_WALLET", "0.0.920001")
 

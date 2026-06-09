@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -32,12 +33,14 @@ class HomeService:
         result = []
         for home in homes:
             rooms = await self.repo.list_rooms(home.id)
-            result.append({
-                "id": home.id,
-                "name": home.name,
-                "address": home.address,
-                "rooms": [self.room_payload({"id": r.id, "name": r.name, "sq_meters": r.sq_meters}) for r in rooms],
-            })
+            result.append(
+                {
+                    "id": home.id,
+                    "name": home.name,
+                    "address": home.address,
+                    "rooms": [self.room_payload({"id": r.id, "name": r.name, "sq_meters": r.sq_meters}) for r in rooms],
+                }
+            )
         return {"homes": result}
 
     async def create_home(self, owner_user_id: int, name: str, address: str) -> dict[str, Any]:

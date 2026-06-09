@@ -7,14 +7,14 @@ import time
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from starlette.middleware.base import BaseHTTPMiddleware
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.api.routes.ai_validation import create_ai_validation_router
 from app.api.routes.audit import create_audit_router
@@ -43,9 +43,9 @@ from app.infrastructure.models import User
 from app.services import marketplace as marketplace_service
 from app.services._base import add_audit
 
-
 configure_logging()
 logger = get_logger("escroweye.main")
+
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -118,7 +118,7 @@ app.include_router(x402_router)
 
 
 def now_iso() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def token_for(user_id: int) -> str:
@@ -182,14 +182,10 @@ async def seed_service_categories(session: AsyncSession) -> None:
     from app.infrastructure.models import ServiceCategory
 
     for cat in marketplace_service.SERVICE_CATEGORIES:
-        existing = await session.execute(
-            select(ServiceCategory).where(ServiceCategory.id == cat["id"])
-        )
+        existing = await session.execute(select(ServiceCategory).where(ServiceCategory.id == cat["id"]))
         if existing.scalar_one_or_none() is None:
             session.add(ServiceCategory(**cat))
     await session.commit()
-
-
 
 
 @app.get("/")

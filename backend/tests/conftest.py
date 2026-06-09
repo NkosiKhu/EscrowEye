@@ -22,6 +22,7 @@ def make_client(tmp_path: Path) -> TestClient:
     async def _setup():
         await create_tables()
         from app.main import seed_service_categories
+
         async with get_session() as session:
             await seed_service_categories(session)
 

@@ -6,6 +6,7 @@ import binascii
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, ed25519, utils
+
 from app.core.config import settings
 
 

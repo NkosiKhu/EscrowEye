@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from fastapi import HTTPException
 from sqlalchemy import func, select
@@ -10,7 +11,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.logging import get_logger
 from app.infrastructure.models import Job, Photo, ProofUpload, Room
 from app.services._base import add_audit, mock_cid
-
 
 logger = get_logger("escroweye.proof")
 
@@ -21,12 +21,12 @@ class ProofService:
         self.now_iso = now_iso
         self.upload_dir = upload_dir
 
-    async def create_proof_record(self, request_id: int, user_id: int, content: bytes, filename: str, content_type: str | None, room_or_area_label: str | None, notes: str | None) -> dict[str, Any]:
+    async def create_proof_record(
+        self, request_id: int, user_id: int, content: bytes, filename: str, content_type: str | None, room_or_area_label: str | None, notes: str | None
+    ) -> dict[str, Any]:
         result = await self.session.execute(select(Job).where(Job.id == request_id))
         result.scalar_one_or_none()
-        seq_result = await self.session.execute(
-            select(func.coalesce(func.max(Photo.sequence), 0)).where(Photo.job_id == request_id)
-        )
+        seq_result = await self.session.execute(select(func.coalesce(func.max(Photo.sequence), 0)).where(Photo.job_id == request_id))
         seq = (seq_result.scalar() or 0) + 1
         cid = mock_cid(content, filename)
         suffix = Path(filename or "proof.bin").suffix or ".bin"
@@ -78,16 +78,12 @@ class ProofService:
         await add_audit(self.session, request_id, "proof_uploaded", {"count": count})
 
     async def list_proof(self, request_id: int) -> dict[str, Any]:
-        result = await self.session.execute(
-            select(ProofUpload).where(ProofUpload.job_id == request_id).order_by(ProofUpload.id)
-        )
+        result = await self.session.execute(select(ProofUpload).where(ProofUpload.job_id == request_id).order_by(ProofUpload.id))
         rows = result.scalars().all()
         return {"proof": [{c.name: getattr(r, c.name) for c in ProofUpload.__table__.columns} for r in rows]}
 
     async def update_proof(self, request_id: int, proof_id: int, body: Any) -> dict[str, Any]:
-        result = await self.session.execute(
-            select(ProofUpload).where(ProofUpload.id == proof_id, ProofUpload.job_id == request_id)
-        )
+        result = await self.session.execute(select(ProofUpload).where(ProofUpload.id == proof_id, ProofUpload.job_id == request_id))
         proof = result.scalar_one_or_none()
         if proof is None:
             raise HTTPException(status_code=404, detail="not_found")

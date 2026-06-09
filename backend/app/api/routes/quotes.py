@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+from typing import Any
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
@@ -10,9 +11,9 @@ from app.services import marketplace as marketplace_service
 
 class QuoteIn(BaseModel):
     amount: int
-    message: Optional[str] = None
-    scope: Optional[str] = None
-    timeline: Optional[str] = None
+    message: str | None = None
+    scope: str | None = None
+    timeline: str | None = None
 
 
 def create_quotes_router(*, db: Callable, current_user: Callable) -> APIRouter:

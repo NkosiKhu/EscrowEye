@@ -2,8 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import Depends, Header, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi import Header, HTTPException, Request
 
 from app.infrastructure.x402_service import X402ConfigurationError, X402Service
 
@@ -25,7 +24,7 @@ async def require_x402_payment(
                 "detail": str(error),
                 "payment_requirements": x402.payment_requirements(),
             },
-        )
+        ) from None
     if not payment.get("valid"):
         raise HTTPException(
             status_code=402,

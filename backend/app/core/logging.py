@@ -2,17 +2,13 @@ from __future__ import annotations
 
 import logging
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Any
 
-try:
-    from pythonjsonlogger.json import JsonFormatter
-except ImportError:
-    from pythonjsonlogger.jsonlogger import JsonFormatter as JsonFormatter  # noqa: F811
+from pythonjsonlogger.json import JsonFormatter  # type: ignore[attr-defined]
+
 from app.core.config import settings
-
 
 _LOG_DIR: Path | None = None
 _LOGGERS: dict[str, logging.Logger] = {}
@@ -28,7 +24,7 @@ class ContextFilter(logging.Filter):
             if not hasattr(record, key):
                 setattr(record, key, value)
         if not hasattr(record, "timestamp"):
-            record.timestamp = datetime.now(timezone.utc).isoformat()
+            record.timestamp = datetime.now(UTC).isoformat()
         return True
 
 
@@ -45,7 +41,7 @@ class RequestContextFilter(ContextFilter):
         self._path = path
 
     def filter(self, record: logging.LogRecord) -> bool:
-        record.timestamp = datetime.now(timezone.utc).isoformat()
+        record.timestamp = datetime.now(UTC).isoformat()
         record.request_id = self._request_id or "-"
         record.user_id = self._user_id or "-"
         record.path = self._path or "-"

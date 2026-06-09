@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import pytest
-from fastapi.testclient import TestClient
 
-from app import main
 from app.infrastructure.hcs_service import HCSConfigurationError, HCSResult, HCSService
 from app.infrastructure.x402_service import X402ConfigurationError, X402Service
 from tests.conftest import make_client

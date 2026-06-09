@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+from typing import Any
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
@@ -23,10 +24,10 @@ class ServiceRequestIn(BaseModel):
     title: str
     description: str
     address: str
-    location_description: Optional[str] = None
-    schedule: Optional[str] = None
+    location_description: str | None = None
+    schedule: str | None = None
     budget_amount: int
-    category: Optional[str] = None
+    category: str | None = None
 
 
 class MessageCreateIn(BaseModel):

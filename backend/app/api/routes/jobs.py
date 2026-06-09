@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any
 
 from fastapi import APIRouter, Depends, File, Form, UploadFile
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from app.api.dependencies import require_x402_payment
@@ -16,13 +17,13 @@ class JobIn(BaseModel):
     title: str
     description: str
     suggested_price_tinybar: int
-    access_notes: Optional[str] = None
-    available_times: Optional[str] = None
+    access_notes: str | None = None
+    available_times: str | None = None
 
 
 class BidIn(BaseModel):
     amount_tinybar: int
-    message: Optional[str] = None
+    message: str | None = None
 
 
 class AwardIn(BaseModel):
@@ -30,7 +31,7 @@ class AwardIn(BaseModel):
 
 
 class ReadyIn(BaseModel):
-    message: Optional[str] = None
+    message: str | None = None
 
 
 class DisputeIn(BaseModel):
@@ -43,9 +44,9 @@ class MessageIn(BaseModel):
 
 
 class PhotoPatch(BaseModel):
-    room_id: Optional[int] = None
-    review_status: Optional[str] = Field(default=None, pattern="^(pending|passed|failed|needs_retake)$")
-    review_notes: Optional[str] = None
+    room_id: int | None = None
+    review_status: str | None = Field(default=None, pattern="^(pending|passed|failed|needs_retake)$")
+    review_notes: str | None = None
 
 
 def create_jobs_router(

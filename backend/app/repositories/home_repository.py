@@ -13,9 +13,7 @@ class HomeRepository:
         self.session = session
 
     async def list_home_ids_for_owner(self, owner_user_id: int) -> list[Home]:
-        result = await self.session.execute(
-            select(Home).where(Home.owner_user_id == owner_user_id).order_by(Home.id)
-        )
+        result = await self.session.execute(select(Home).where(Home.owner_user_id == owner_user_id).order_by(Home.id))
         return list(result.scalars().all())
 
     async def get_home(self, home_id: int, owner_user_id: int | None = None) -> Home | None:
@@ -26,9 +24,7 @@ class HomeRepository:
         return result.scalar_one_or_none()
 
     async def list_rooms(self, home_id: int) -> list[Room]:
-        result = await self.session.execute(
-            select(Room).where(Room.home_id == home_id).order_by(Room.id)
-        )
+        result = await self.session.execute(select(Room).where(Room.home_id == home_id).order_by(Room.id))
         return list(result.scalars().all())
 
     async def create_home(self, owner_user_id: int, name: str, address: str, now: str) -> int:
@@ -71,9 +67,7 @@ class HomeRepository:
         home = await self.get_home(home_id, owner_user_id)
         if home is None:
             return False
-        result = await self.session.execute(
-            select(Room).where(Room.id == room_id, Room.home_id == home_id)
-        )
+        result = await self.session.execute(select(Room).where(Room.id == room_id, Room.home_id == home_id))
         room = result.scalar_one_or_none()
         if room is None:
             return False

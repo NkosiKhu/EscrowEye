@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+from typing import Any
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import Response
@@ -16,7 +17,7 @@ class HomeIn(BaseModel):
 
 class RoomIn(BaseModel):
     name: str
-    sq_meters: Optional[float] = None
+    sq_meters: float | None = None
 
 
 def create_homes_router(

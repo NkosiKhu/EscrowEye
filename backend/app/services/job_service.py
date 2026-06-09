@@ -5,17 +5,17 @@ import json
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from fastapi import HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import settings
 from app.infrastructure.models import Bid, Home, Job, Message, MessagePhoto, Photo, Room, User
 from app.services._base import audit_events as base_audit_events
-from app.services._base import get_job, get_user, mock_cid, now_iso
+from app.services._base import get_job, get_user, mock_cid
 
 
 class JobService:
@@ -48,11 +48,7 @@ class JobService:
         if job.supplier_user_id is not None:
             supplier_result = await self.session.execute(select(User).where(User.id == job.supplier_user_id))
             supplier = supplier_result.scalar_one_or_none()
-        bid_result = await self.session.execute(
-            select(func.count(Bid.id), func.min(Bid.amount_tinybar)).where(
-                Bid.job_id == job.id, Bid.status != "withdrawn"
-            )
-        )
+        bid_result = await self.session.execute(select(func.count(Bid.id), func.min(Bid.amount_tinybar)).where(Bid.job_id == job.id, Bid.status != "withdrawn"))
         bid_row = bid_result.one()
         bid_count = bid_row[0] or 0
         min_bid = bid_row[1]
@@ -64,7 +60,17 @@ class JobService:
             "status": job.status,
             "home": {"id": home.id, "name": home.name, "address": home.address} if home else {"id": job.home_id, "name": "Service address", "address": ""},
             "owner": {"id": owner.id, "hedera_account_id": owner.hedera_account_id},
-            "supplier": self.public_user({"id": supplier.id, "email": supplier.email, "user_type": supplier.user_type, "hedera_account_id": supplier.hedera_account_id, "hedera_public_key": supplier.hedera_public_key} if supplier else None),
+            "supplier": self.public_user(
+                {
+                    "id": supplier.id,
+                    "email": supplier.email,
+                    "user_type": supplier.user_type,
+                    "hedera_account_id": supplier.hedera_account_id,
+                    "hedera_public_key": supplier.hedera_public_key,
+                }
+                if supplier
+                else None
+            ),
             "bid_count": bid_count,
             "lowest_bid_tinybar": min_bid,
             "created_at": job.created_at,
@@ -77,15 +83,17 @@ class JobService:
         if job.accepted_bid_id is not None:
             bid_result = await self.session.execute(select(Bid).where(Bid.id == job.accepted_bid_id))
             accepted = bid_result.scalar_one_or_none()
-        data.update({
-            "access_notes": job.access_notes,
-            "available_times": job.available_times,
-            "escrow_account_id": job.escrow_account_id,
-            "hcs_topic_id": job.hcs_topic_id,
-            "accepted_bid": {"id": accepted.id, "amount_tinybar": accepted.amount_tinybar} if accepted else None,
-            "creation_fee_paid": bool(job.creation_fee_paid),
-            "updated_at": job.updated_at,
-        })
+        data.update(
+            {
+                "access_notes": job.access_notes,
+                "available_times": job.available_times,
+                "escrow_account_id": job.escrow_account_id,
+                "hcs_topic_id": job.hcs_topic_id,
+                "accepted_bid": {"id": accepted.id, "amount_tinybar": accepted.amount_tinybar} if accepted else None,
+                "creation_fee_paid": bool(job.creation_fee_paid),
+                "updated_at": job.updated_at,
+            }
+        )
         return data
 
     async def bid_payload(self, bid: Bid) -> dict[str, Any]:
@@ -133,7 +141,17 @@ class JobService:
         return {
             "id": msg.id,
             "sender_user_id": msg.sender_user_id,
-            "sender": self.public_user({"id": sender.id, "email": sender.email, "user_type": sender.user_type, "hedera_account_id": sender.hedera_account_id, "hedera_public_key": sender.hedera_public_key} if sender else None),
+            "sender": self.public_user(
+                {
+                    "id": sender.id,
+                    "email": sender.email,
+                    "user_type": sender.user_type,
+                    "hedera_account_id": sender.hedera_account_id,
+                    "hedera_public_key": sender.hedera_public_key,
+                }
+                if sender
+                else None
+            ),
             "sender_type": msg.sender_type,
             "body": msg.body,
             "photo_ids": [p.id for p in photo_rows],
@@ -184,9 +202,7 @@ class JobService:
 
     async def list_bids(self, job_id: int) -> dict[str, Any]:
         await get_job(self.session, job_id)
-        result = await self.session.execute(
-            select(Bid).where(Bid.job_id == job_id, Bid.status != "withdrawn").order_by(Bid.amount_tinybar)
-        )
+        result = await self.session.execute(select(Bid).where(Bid.job_id == job_id, Bid.status != "withdrawn").order_by(Bid.amount_tinybar))
         bids = result.scalars().all()
         results = []
         for bid in bids:
@@ -210,9 +226,7 @@ class JobService:
         return {"id": bid.id, "amount_tinybar": body.amount_tinybar, "status": "pending"}
 
     async def update_bid(self, bid_id: int, body: Any, user: dict[str, Any]) -> dict[str, Any]:
-        result = await self.session.execute(
-            select(Bid).where(Bid.id == bid_id, Bid.supplier_user_id == user["id"])
-        )
+        result = await self.session.execute(select(Bid).where(Bid.id == bid_id, Bid.supplier_user_id == user["id"]))
         bid = result.scalar_one_or_none()
         if bid is None:
             raise HTTPException(status_code=404, detail="not_found")
@@ -225,9 +239,7 @@ class JobService:
         return {"id": bid_id, "amount_tinybar": body.amount_tinybar, "status": "pending"}
 
     async def delete_bid(self, bid_id: int, user: dict[str, Any]) -> None:
-        result = await self.session.execute(
-            select(Bid).where(Bid.id == bid_id, Bid.supplier_user_id == user["id"])
-        )
+        result = await self.session.execute(select(Bid).where(Bid.id == bid_id, Bid.supplier_user_id == user["id"]))
         bid = result.scalar_one_or_none()
         if bid is None:
             raise HTTPException(status_code=404, detail="not_found")
@@ -239,9 +251,7 @@ class JobService:
         job = job_result.scalar_one_or_none()
         if job is None:
             raise HTTPException(status_code=404, detail="not_found")
-        bid_result = await self.session.execute(
-            select(Bid).where(Bid.id == bid_id, Bid.job_id == job_id, Bid.status == "pending")
-        )
+        bid_result = await self.session.execute(select(Bid).where(Bid.id == bid_id, Bid.job_id == job_id, Bid.status == "pending"))
         bid = bid_result.scalar_one_or_none()
         if bid is None:
             raise HTTPException(status_code=404, detail="not_found")
@@ -254,7 +264,19 @@ class JobService:
         job.status = "awarded"
         job.updated_at = now
         supplier = await get_user(self.session, bid.supplier_user_id)
-        return {"job_id": job_id, "status": "awarded", "supplier": self.public_user({"id": supplier.id, "email": supplier.email, "user_type": supplier.user_type, "hedera_account_id": supplier.hedera_account_id, "hedera_public_key": supplier.hedera_public_key})}
+        return {
+            "job_id": job_id,
+            "status": "awarded",
+            "supplier": self.public_user(
+                {
+                    "id": supplier.id,
+                    "email": supplier.email,
+                    "user_type": supplier.user_type,
+                    "hedera_account_id": supplier.hedera_account_id,
+                    "hedera_public_key": supplier.hedera_public_key,
+                }
+            ),
+        }
 
     async def fund_job(self, job_id: int, user: dict[str, Any]) -> dict[str, Any]:
         job_result = await self.session.execute(select(Job).where(Job.id == job_id, Job.owner_user_id == user["id"]))
@@ -330,15 +352,15 @@ class JobService:
             "created_at": msg.created_at,
         }
 
-    async def create_photo_record(self, job_id: int, room_id: int | None, user_id: int, content: bytes, filename: str, content_type: str | None, encrypted_keys: str | None) -> dict[str, Any]:
+    async def create_photo_record(
+        self, job_id: int, room_id: int | None, user_id: int, content: bytes, filename: str, content_type: str | None, encrypted_keys: str | None
+    ) -> dict[str, Any]:
         await get_job(self.session, job_id)
         if room_id is not None:
             room_result = await self.session.execute(select(Room).where(Room.id == room_id))
             if room_result.scalar_one_or_none() is None:
                 raise HTTPException(status_code=404, detail="room_not_found")
-        seq_result = await self.session.execute(
-            select(func.coalesce(func.max(Photo.sequence), 0)).where(Photo.job_id == job_id)
-        )
+        seq_result = await self.session.execute(select(func.coalesce(func.max(Photo.sequence), 0)).where(Photo.job_id == job_id))
         seq = (seq_result.scalar() or 0) + 1
         cid = mock_cid(content, filename)
         suffix = Path(filename or "photo.bin").suffix or ".bin"
@@ -426,13 +448,9 @@ class JobService:
         return await base_audit_events(self.session, job_id)
 
     async def review_photos(self, job_id: int, photo_ids: list[int]) -> None:
-        rooms_result = await self.session.execute(
-            select(Room).join(Job, Job.home_id == Room.home_id).where(Job.id == job_id).order_by(Room.id)
-        )
+        rooms_result = await self.session.execute(select(Room).join(Job, Job.home_id == Room.home_id).where(Job.id == job_id).order_by(Room.id))
         rooms = rooms_result.scalars().all()
-        photos_result = await self.session.execute(
-            select(Photo).where(Photo.job_id == job_id, Photo.id.in_(photo_ids)).order_by(Photo.sequence)
-        )
+        photos_result = await self.session.execute(select(Photo).where(Photo.job_id == job_id, Photo.id.in_(photo_ids)).order_by(Photo.sequence))
         photos = photos_result.scalars().all()
         failures: list[str] = []
         for index, photo in enumerate(photos):
@@ -468,7 +486,7 @@ class JobService:
         await self.insert_message(job_id, None, "agent", summary, [])
         await self.insert_message(job_id, None, "system", "Automated photo review completed.", [])
 
-    async def openrouter_review_photo(self, job_id: int, rooms: list[Room], photo: Photo) -> dict[str, Any] | None:
+    async def openrouter_review_photo(self, job_id: int, rooms: Sequence[Room], photo: Photo) -> dict[str, Any] | None:
         if not self.openrouter_api_key:
             return None
         path = self.base_dir / photo.storage_path
@@ -486,7 +504,12 @@ class JobService:
         payload = {
             "model": self.openrouter_model,
             "temperature": 0,
-            "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{image_data}"}}]}],
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{image_data}"}}],
+                }
+            ],
         }
         request = urllib.request.Request(
             "https://openrouter.ai/api/v1/chat/completions",

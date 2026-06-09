@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable, Protocol
+from typing import Any, Protocol
 
 from app.core.config import settings
 
@@ -20,8 +21,7 @@ class HCSResult:
 
 
 class HCSClient(Protocol):
-    def submit_message(self, topic_id: str, message: str) -> HCSResult:
-        ...
+    def submit_message(self, topic_id: str, message: str) -> HCSResult: ...
 
 
 class HieroHCSClient:
@@ -37,11 +37,7 @@ class HieroHCSClient:
         self._client.set_operator(operator_id, self._operator_key)
 
     def submit_message(self, topic_id: str, message: str) -> HCSResult:
-        transaction = (
-            self._topic_submit_transaction(topic_id=topic_id, message=message)
-            .freeze_with(self._client)
-            .sign(self._operator_key)
-        )
+        transaction = self._topic_submit_transaction(topic_id=topic_id, message=message).freeze_with(self._client).sign(self._operator_key)
         response = transaction.execute(self._client)
         tx_id = str(getattr(response, "transaction_id", response))
         return HCSResult(status="submitted", tx_id=tx_id, topic_id=topic_id)
