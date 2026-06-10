@@ -717,7 +717,7 @@ async def service_request_payload(session: AsyncSession, job: Job) -> dict[str, 
         supplier = supplier_result.scalar_one_or_none()
     bids_result = await session.execute(select(func.count(Bid.id), func.min(Bid.amount_tinybar)).where(Bid.job_id == job.id, Bid.status != "withdrawn"))
     bids_row = bids_result.one()
-    validation_result = await session.execute(select(AIValidation.status).where(AIValidation.job_id == job.id).order_by(AIValidation.id.desc()))
+    validation_result = await session.execute(select(AIValidation.status).where(AIValidation.job_id == job.id).order_by(AIValidation.id.desc()).limit(1))
     validation = validation_result.scalar_one_or_none()
     return {
         "id": job.id,
